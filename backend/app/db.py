@@ -83,6 +83,30 @@ CREATE TABLE IF NOT EXISTS scrape_logs (
     level TEXT NOT NULL DEFAULT 'info',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    league_id INTEGER,
+    match_id INTEGER,
+    home_team_id INTEGER,
+    away_team_id INTEGER,
+    home_name TEXT,
+    away_name TEXT,
+    match_date TEXT,
+    pick_type TEXT,                  -- 1X2 | GOLS | BTTS | PLACAR
+    pick_value TEXT,                 -- "1"|"X"|"2", "over_2.5", "sim", "2-1"
+    pick_label TEXT,                 -- ex "Back Real Madrid", "Over 2.5"
+    prob REAL,
+    odd REAL,
+    payload TEXT,                    -- JSON com a previsão completa
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | correct | wrong
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+CREATE INDEX IF NOT EXISTS idx_predictions_match ON predictions(match_id);
 """
 
 

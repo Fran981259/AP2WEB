@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from . import db, scraper
 from .auth import authenticate, create_user, current_user
+from .history import delete_prediction, list_predictions, save_prediction, stats
 from .prediction import predict_league_upcoming, predict_match, predict_fixture
 
 app = FastAPI(title="AP2WEB", version="0.1.0")
@@ -64,6 +65,22 @@ class FixtureBody(BaseModel):
     league_id: int
     home_team_id: int
     away_team_id: int
+
+
+class PredictionBody(BaseModel):
+    league_id: int
+    match_id: int | None = None
+    home_team_id: int
+    away_team_id: int
+    home_name: str
+    away_name: str
+    match_date: str | None = None
+    pick_type: str
+    pick_value: str
+    pick_label: str
+    prob: float
+    odd: float
+    payload: dict = {}
 
 
 @app.post("/api/register", tags=["auth"])
@@ -156,6 +173,32 @@ def prediction(match_id: int, user: str = Depends(current_user)):
 @app.get("/api/leagues/{league_id}/predictions", tags=["prediction"])
 def league_predictions(league_id: int, user: str = Depends(current_user)):
     return predict_league_upcoming(league_id)
+
+
+# --------------------------- histórico de previsões ---------------------------
+
+def _user_id(username: str) -> int:
+    row = db.run_query("SELECT id FROM users WHERE username=?", (username,))
+    if not row:
+        raise HTTPException(status_code=401, detail="Usuário não encontrado")
+    return row[0]["id"]
+
+
+@app.post("/api/predictions", tags=["prediction"])
+def create_prediction(body: PredictionBody, user: str = Depends(current_user)):
+    return save_prediction(_user_id(user), body.model_dump())
+
+
+@app.get("/api/predictions", tags=["prediction"])
+def get_predictions(user: str = Depends(current_user)):
+    uid = _user_id(user)
+    return {"stats": stats(uid), "items": list_predictions(uid)}
+
+
+@app.delete("/api/predictions/{prediction_id}", tags=["prediction"])
+def remove_prediction(prediction_id: int, user: str = Depends(current_user)):
+    delete_prediction(_user_id(user), prediction_id)
+    return {"ok": True}
 
 
 @app.get("/api/health", tags=["misc"])
