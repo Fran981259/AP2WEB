@@ -1,0 +1,21 @@
+# Render Blueprint — AP2WEB
+# Deploy: envie o repositório para o GitHub e crie um "Blueprint" no Render
+# usando este arquivo, OU use "New Web Service" apontando para o Dockerfile.
+services:
+  - type: web
+    name: ap2web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: AP2WEB_ORIGINS
+        value: https://app.theprostatereview.com
+      - key: AP2WEB_DB_PATH
+        value: /data/ap2web.db
+      - key: AP2WEB_SECRET
+        generateValue: true
+    disk:
+      name: ap2web-data
+      mountPath: /data
+      sizeGB: 1
