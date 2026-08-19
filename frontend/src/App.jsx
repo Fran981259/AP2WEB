@@ -118,6 +118,8 @@ function Dashboard({ username, token, onLogout }) {
   const [calTimer, setCalTimer] = useState(null)
   const [backtest, setBacktest] = useState(null)
   const [backtesting, setBacktesting] = useState(false)
+  const [dataOv, setDataOv] = useState([])
+  const [dataFilter, setDataFilter] = useState('')
 
   async function refreshLeagues() {
     setLeagues(await api.leagues(token))
@@ -128,6 +130,7 @@ function Dashboard({ username, token, onLogout }) {
     loadRuns()
     if (tab === 'historico') loadHistory()
     if (tab === 'aprendizado') loadLearning()
+    if (tab === 'dados') loadDataOverview()
   }, [tab])
 
   useEffect(() => () => clearInterval(batchTimer), [batchTimer])
@@ -143,6 +146,10 @@ function Dashboard({ username, token, onLogout }) {
 
   async function loadLearning() {
     try { setLearn(await api.learningStatus(token)) } catch (e) { setError(e.message) }
+  }
+
+  async function loadDataOverview() {
+    try { setDataOv(await api.dataOverview(token)) } catch (e) { setError(e.message) }
   }
 
   async function startCalibration() {
@@ -336,6 +343,7 @@ function Dashboard({ username, token, onLogout }) {
           <button className={tab === 'liga' ? 'active' : ''} onClick={() => setTab('liga')}>Ligas</button>
           <button className={tab === 'historico' ? 'active' : ''} onClick={() => setTab('historico')}>Histórico</button>
           <button className={tab === 'aprendizado' ? 'active' : ''} onClick={() => setTab('aprendizado')}>Aprendizado</button>
+          <button className={tab === 'dados' ? 'active' : ''} onClick={() => setTab('dados')}>Dados</button>
           <button className={tab === 'scrape' ? 'active' : ''} onClick={() => setTab('scrape')}>Raspagem</button>
         </nav>
         <div className="user">
@@ -586,6 +594,51 @@ function Dashboard({ username, token, onLogout }) {
         </main>
       )}
 
+      {tab === 'dados' && (
+        <main className="column">
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h3>🗄️ Dados utilizados na análise</h3>
+                <p className="muted small">Visão geral por liga: quantos jogos estão no banco, se há dados corrompidos, quando foi a última partida registrada e o estado do modelo calibrado.</p>
+              </div>
+              <button className="btn-small" onClick={loadDataOverview}>🔄 Atualizar</button>
+            </div>
+            <input className="search" placeholder="Buscar liga..." value={dataFilter}
+                   onChange={e => setDataFilter(e.target.value)} style={{ marginBottom: 12 }} />
+            <div className="table-scroll">
+              <table className="runs">
+                <thead>
+                  <tr><th>Liga</th><th>Jogados</th><th>Agendados</th><th>Dados limpos</th><th>Corrompidos</th><th>Stats</th><th>Última partida</th><th>Modelo</th><th>HA</th><th>Jan</th><th>Acur.</th></tr>
+                </thead>
+                <tbody>
+                  {dataOv
+                    .filter(r => !dataFilter.trim() || r.name.toLowerCase().includes(dataFilter.trim().toLowerCase()))
+                    .map(r => (
+                      <tr key={r.id}>
+                        <td><b>{r.name}</b></td>
+                        <td>{r.played}</td>
+                        <td>{r.scheduled}</td>
+                        <td>{r.clean}</td>
+                        <td>{r.corrupt > 0 ? <span style={{ color: '#f87171' }}>{r.corrupt} ⚠️</span> : <span style={{ color: '#4ade80' }}>0 ✓</span>}</td>
+                        <td>{r.stats_rows}</td>
+                        <td>{r.last_played || '—'}</td>
+                        <td>{r.has_model ? '✅' : '—'}</td>
+                        <td>{r.home_advantage != null ? Number(r.home_advantage).toFixed(2) : '—'}</td>
+                        <td>{r.window || '—'}</td>
+                        <td>{r.accuracy ? `${r.accuracy.toFixed(1)}%` : '—'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="muted small" style={{ marginTop: 10 }}>
+              Corrompidos = placares impossíveis (ex.: horários virando placar). Agora o parser ignora jogos futuros; se aparecer ⚠️, rode a raspagem para limpar.
+            </p>
+          </section>
+        </main>
+      )}
+
       {tab === 'scrape' && (
         <main className="column">
           <section className="panel">
@@ -735,6 +788,7 @@ function NeuralNet({ learn, cal }) {
 function PredictionView({ p, token, onSave }) {
   const { match, lambdas, probs, top_scores, proposals, compare, model } = p
   const [picked, setPicked] = useState(null)
+  const [chestOpen, setChestOpen] = useState(false)
 
   const pickOptions = useMemo(() => {
     const opts = []
@@ -893,6 +947,83 @@ function PredictionView({ p, token, onSave }) {
             💾 Salvar previsão
           </button>
         </Card>
+
+        <div className="data-chest">
+          <button className="chest-toggle" onClick={() => setChestOpen(!chestOpen)}>
+            <span>🗄️ Baú de dados deste confronto</span>
+            <span className={chestOpen ? 'chest-arrow open' : 'chest-arrow'}>{chestOpen ? '▲' : '▼'}</span>
+          </button>
+          {chestOpen && p.data && (
+            <div className="chest-body">
+              <div className="chest-grid">
+                <div>
+                  <h4>📌 Dados usados nas médias (λ)</h4>
+                  <p className="muted small">Fonte: {p.data.source === 'team_stats' ? 'team_stats (stats por time do soccerstats)' : 'placares jogados (cálculo local)'} · janela {p.data.model.window} · HA {Number(p.data.model.home_advantage).toFixed(2)}</p>
+                  {['home', 'away'].map(side => {
+                    const d = p.data[side]
+                    return (
+                      <div key={side} className="chest-team">
+                        <b>{d.name}</b>
+                        <span className="muted small">média GF {d.avg.gf_avg} · GA {d.avg.ga_avg} · {d.count} jogos usados</span>
+                        <table className="mini">
+                          <tbody>
+                            <tr><th>Data</th><th>Lado</th><th>Adversário</th><th>GF</th><th>GA</th></tr>
+                            {d.games_used.map((g, i) => (
+                              <tr key={i}>
+                                <td>{g.date}</td><td>{g.side}</td><td>{g.opponent}</td>
+                                <td>{g.gf}</td><td>{g.ga}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div>
+                  <h4>⚔️ Confrontos diretos ({p.data.h2h.length})</h4>
+                  {p.data.h2h.length === 0 && <p className="muted small">Sem confrontos diretos no banco.</p>}
+                  <table className="mini">
+                    <tbody>
+                      <tr><th>Data</th><th>Casa</th><th>Fora</th><th>Placar</th></tr>
+                      {p.data.h2h.map((g, i) => (
+                        <tr key={i}><td>{g.match_date}</td><td>{g.home}</td><td>{g.away}</td><td>{g.ft_home}-{g.ft_away}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <h4 style={{ marginTop: 14 }}>📈 Forma recente</h4>
+                  {['home', 'away'].map(side => {
+                    const d = p.data.form[side]
+                    return (
+                      <div key={side}>
+                        <b className="small">{side === 'home' ? match.home : match.away}</b>
+                        <div className="form-dots">
+                          {d.map((g, i) => (
+                            <span key={i} className={`fdot ${g.result === 'W' ? 'w' : g.result === 'D' ? 'd' : 'l'}`}
+                                  title={`${g.date} vs ${g.opponent} (${g.gf}-${g.ga})`}>
+                              {g.result}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                  <h4 style={{ marginTop: 14 }}>🧠 Modelo calibrado</h4>
+                  <p className="muted small">
+                    HA {Number(p.data.model.home_advantage).toFixed(2)} · janela {p.data.model.window}
+                    {p.data.model.accuracy != null && <> · acurácia {Number(p.data.model.accuracy).toFixed(1)}%</>}
+                    {p.data.model.brier != null && <> · Brier {Number(p.data.model.brier).toFixed(3)}</>}
+                  </p>
+                </div>
+              </div>
+              <details className="chest-raw">
+                <summary>🔍 JSON completo (tudo sem exceção)</summary>
+                <pre>{JSON.stringify(p.data, null, 2)}</pre>
+              </details>
+            </div>
+          )}
+          {chestOpen && !p.data && <div className="chest-body muted small">Dados não disponíveis para este confronto.</div>}
+        </div>
       </div>
     </div>
   )

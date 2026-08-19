@@ -40,6 +40,31 @@ def _avg_stats(league_id: int, team_id: int, window: int = 10) -> dict:
     return {"gf_avg": 1.2, "ga_avg": 1.2}
 
 
+def _avg_stats_detail(league_id: int, team_id: int, window: int = 10) -> dict:
+    """Jogos brutos que alimentaram as médias (para auditoria do confronto)."""
+    rows = db.run_query(
+        "SELECT m.match_date, th.name AS home, ta.name AS away, "
+        "       m.ft_home, m.ft_away, m.home_team_id "
+        "FROM matches m "
+        "JOIN teams th ON th.id=m.home_team_id "
+        "JOIN teams ta ON ta.id=m.away_team_id "
+        "WHERE m.league_id=? AND (m.home_team_id=? OR m.away_team_id=?) "
+        "  AND m.status='played' AND m.ft_home IS NOT NULL "
+        "ORDER BY m.match_date DESC LIMIT ?",
+        (league_id, team_id, team_id, window))
+    games = []
+    for m in rows:
+        home_side = m["home_team_id"] == team_id
+        games.append({
+            "date": m["match_date"],
+            "opponent": m["away"] if home_side else m["home"],
+            "side": "casa" if home_side else "fora",
+            "gf": m["ft_home"] if home_side else m["ft_away"],
+            "ga": m["ft_away"] if home_side else m["ft_home"],
+        })
+    return {"games_used": games, "count": len(games)}
+
+
 def _model_for(league_id: int) -> dict:
     """Parâmetros calibrados da liga (fator de mando + janela)."""
     return get_model(league_id)
@@ -128,6 +153,8 @@ def predict_match(match_id: int) -> dict:
     model = _model_for(m["league_id"])
     home_stats = _avg_stats(m["league_id"], m["home_team_id"], model["window"])
     away_stats = _avg_stats(m["league_id"], m["away_team_id"], model["window"])
+    home_detail = _avg_stats_detail(m["league_id"], m["home_team_id"], model["window"])
+    away_detail = _avg_stats_detail(m["league_id"], m["away_team_id"], model["window"])
 
     mi = MatchInput(
         league=m["league_name"],
@@ -157,6 +184,19 @@ def predict_match(match_id: int) -> dict:
                             m["home_name"], m["away_name"], home_stats, away_stats),
         "model": {"home_advantage": model["home_advantage"], "window": model["window"],
                   "accuracy": model.get("accuracy"), "brier": model.get("brier")},
+        "data": {
+            "source": "team_stats" if db.run_query(
+                "SELECT 1 FROM team_stats ts JOIN matches m ON m.id=ts.match_id "
+                "WHERE m.league_id=? AND ts.team_id=? LIMIT 1",
+                (m["league_id"], m["home_team_id"])) else "placares_jogados",
+            "home": {"name": m["home_name"], "avg": home_stats, **home_detail},
+            "away": {"name": m["away_name"], "avg": away_stats, **away_detail},
+            "form": {"home": _recent_form(m["league_id"], m["home_team_id"]),
+                     "away": _recent_form(m["league_id"], m["away_team_id"])},
+            "h2h": _h2h(m["league_id"], m["home_team_id"], m["away_team_id"], limit=10),
+            "model": {"home_advantage": model["home_advantage"], "window": model["window"],
+                      "accuracy": model.get("accuracy"), "brier": model.get("brier")},
+        },
     }
 
 
@@ -180,6 +220,8 @@ def predict_fixture(league_id: int, home_team_id: int, away_team_id: int) -> dic
     model = _model_for(league_id)
     home_stats = _avg_stats(league_id, home_team_id, model["window"])
     away_stats = _avg_stats(league_id, away_team_id, model["window"])
+    home_detail = _avg_stats_detail(league_id, home_team_id, model["window"])
+    away_detail = _avg_stats_detail(league_id, away_team_id, model["window"])
 
     mi = MatchInput(
         league=l["name"],
@@ -209,4 +251,17 @@ def predict_fixture(league_id: int, home_team_id: int, away_team_id: int) -> dic
                             names[home_team_id], names[away_team_id], home_stats, away_stats),
         "model": {"home_advantage": model["home_advantage"], "window": model["window"],
                   "accuracy": model.get("accuracy"), "brier": model.get("brier")},
+        "data": {
+            "source": "team_stats" if db.run_query(
+                "SELECT 1 FROM team_stats ts JOIN matches m ON m.id=ts.match_id "
+                "WHERE m.league_id=? AND ts.team_id=? LIMIT 1",
+                (league_id, home_team_id)) else "placares_jogados",
+            "home": {"name": names[home_team_id], "avg": home_stats, **home_detail},
+            "away": {"name": names[away_team_id], "avg": away_stats, **away_detail},
+            "form": {"home": _recent_form(league_id, home_team_id),
+                     "away": _recent_form(league_id, away_team_id)},
+            "h2h": _h2h(league_id, home_team_id, away_team_id, limit=10),
+            "model": {"home_advantage": model["home_advantage"], "window": model["window"],
+                      "accuracy": model.get("accuracy"), "brier": model.get("brier")},
+        },
     }

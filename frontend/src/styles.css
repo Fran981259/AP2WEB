@@ -172,6 +172,40 @@ td { padding: 8px; border-bottom: 1px solid var(--border); }
   100% { stroke-dashoffset: 0; }
 }
 .nn-edge { stroke-dasharray: 5 8; animation: nn-flow 1.6s linear infinite; }
+.data-chest { margin-top: 12px; }
+.chest-toggle {
+  width: 100%; display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; background: rgba(148,163,184,.08); border: 1px solid rgba(148,163,184,.25);
+  border-radius: 10px; color: var(--text); cursor: pointer; font-weight: 600; font-size: 13px;
+}
+.chest-toggle:hover { background: rgba(148,163,184,.15); }
+.chest-arrow { color: var(--accent2); font-size: 10px; transition: transform .2s; }
+.chest-arrow.open { transform: rotate(180deg); }
+.chest-body {
+  margin-top: 8px; padding: 14px; background: rgba(8,10,24,.45);
+  border: 1px solid rgba(148,163,184,.15); border-radius: 10px;
+}
+.chest-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .chest-grid { grid-template-columns: 1fr; } }
+.chest-team { margin: 8px 0; }
+table.mini { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 6px; }
+table.mini th, table.mini td { padding: 3px 6px; text-align: left; border-bottom: 1px solid rgba(148,163,184,.12); }
+table.mini th { color: var(--accent2); font-weight: 600; }
+.form-dots { display: flex; gap: 4px; margin: 4px 0; }
+.fdot {
+  width: 22px; height: 22px; border-radius: 50%; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #0b0e1a;
+}
+.fdot.w { background: #4ade80; }
+.fdot.d { background: #fbbf24; }
+.fdot.l { background: #f87171; }
+.chest-raw { margin-top: 14px; }
+.chest-raw summary { cursor: pointer; color: var(--accent2); font-size: 12.5px; }
+.chest-raw pre {
+  margin-top: 8px; padding: 10px; max-height: 360px; overflow: auto;
+  background: #0b0e1a; border: 1px solid rgba(148,163,184,.15); border-radius: 8px;
+  font-size: 11px; color: #cbd5e1; white-space: pre-wrap; word-break: break-all;
+}
 
 .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 14px 0; }
 .card {

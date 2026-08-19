@@ -21,6 +21,7 @@ export const api = {
     return this.request('/register', { method: 'POST', body: { username, password } })
   },
   leagues(token) { return this.request('/leagues', { token }) },
+  dataOverview(token) { return this.request('/data/overview', { token }) },
   leagueMatches(id, token) { return this.request(`/leagues/${id}/matches`, { token }) },
   leagueTeams(id, token) { return this.request(`/leagues/${id}/teams`, { token }) },
   prediction(id, token) { return this.request(`/matches/${id}/prediction`, { token }) },

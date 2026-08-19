@@ -146,6 +146,27 @@ def leagues(user: str = Depends(current_user)):
         "FROM leagues l ORDER BY l.name")]
 
 
+@app.get("/api/data/overview", tags=["data"])
+def data_overview(user: str = Depends(current_user)):
+    """Visão geral dos dados por liga: volume, qualidade, calibração e última partida."""
+    rows = db.run_query(
+        "SELECT l.id, l.code, l.name, l.country, "
+        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played') AS played, "
+        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='scheduled') AS scheduled, "
+        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played' "
+        "   AND (m.ft_home IS NULL OR m.ft_home > 12 OR m.ft_away > 12 OR m.ft_home < 0 OR m.ft_away < 0)) AS corrupt, "
+        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played' "
+        "   AND m.ft_home IS NOT NULL AND m.ft_home <= 12 AND m.ft_away <= 12) AS clean, "
+        " (SELECT MAX(m.match_date) FROM matches m WHERE m.league_id=l.id AND m.status='played') AS last_played, "
+        " (SELECT COUNT(*) FROM team_stats ts JOIN matches m ON m.id=ts.match_id "
+        "   WHERE m.league_id=l.id) AS stats_rows, "
+        " (SELECT COUNT(*) FROM league_models lm WHERE lm.league_id=l.id) AS has_model, "
+        " lm.home_advantage, lm.window, lm.accuracy, lm.brier, lm.calibrated_at "
+        "FROM leagues l LEFT JOIN league_models lm ON lm.league_id=l.id "
+        "ORDER BY l.name")
+    return [dict(r) for r in rows]
+
+
 @app.get("/api/leagues/{league_id}/teams", tags=["data"])
 def league_teams(league_id: int, user: str = Depends(current_user)):
     return [dict(r) for r in db.run_query(

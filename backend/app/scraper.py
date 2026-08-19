@@ -259,12 +259,22 @@ def parse_results_page(html: str, league_code: str) -> list[dict]:
         if not fm:
             continue
         ft_home, ft_away = int(fm.group(1)), int(fm.group(2))
+        # A página bydate mistura jogos jogados (placar) com jogos futuros
+        # (horário de kickoff tipo 00:30). Um placar real de futebol nunca passa
+        # de ~12 gols; valores maiores são horários. Exigimos HT real para
+        # confirmar que a partida foi disputada.
+        if ft_home > 12 or ft_away > 12:
+            continue
         ht_home = ht_away = None
         for c in cells[4:]:
             hm = re.search(r"\((\d+)\s*-\s*(\d+)\)", c.get_text(" ", strip=True))
             if hm:
                 ht_home, ht_away = int(hm.group(1)), int(hm.group(2))
                 break
+        if ht_home is None:
+            # sem placar de intervalo: provável jogo futuro marcado como "abandoned" —
+            # não salvar como jogado
+            continue
         out.append({
             "league_code": league_code,
             "home": {"name": home, "kickoff": None, "stats": {}},
