@@ -35,6 +35,10 @@ export const api = {
   scrapeBatch(token) { return this.request('/scrape/batch', { method: 'POST', token }) },
   scrapeBatchStatus(token) { return this.request('/scrape/batch/status', { token }) },
   runs(token) { return this.request('/runs', { token }) },
+  learningStatus(token) { return this.request('/learning/status', { token }) },
+  learningCalibrate(token) { return this.request('/learning/calibrate', { method: 'POST', body: {}, token }) },
+  learningCalibrateStatus(token) { return this.request('/learning/calibrate/status', { token }) },
+  learningBacktest(leagueId, token) { return this.request(`/learning/backtest/${leagueId}`, { token }) },
   predictions(token) { return this.request('/predictions', { token }) },
   savePrediction(data, token) { return this.request('/predictions', { method: 'POST', body: data, token }) },
   deletePrediction(id, token) { return this.request(`/predictions/${id}`, { method: 'DELETE', token }) }

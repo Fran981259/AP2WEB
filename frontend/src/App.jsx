@@ -113,6 +113,11 @@ function Dashboard({ username, token, onLogout }) {
   const [leagueSearch, setLeagueSearch] = useState('')
   const [batch, setBatch] = useState(null)
   const [batchTimer, setBatchTimer] = useState(null)
+  const [learn, setLearn] = useState(null)
+  const [cal, setCal] = useState(null)
+  const [calTimer, setCalTimer] = useState(null)
+  const [backtest, setBacktest] = useState(null)
+  const [backtesting, setBacktesting] = useState(false)
 
   async function refreshLeagues() {
     setLeagues(await api.leagues(token))
@@ -122,9 +127,11 @@ function Dashboard({ username, token, onLogout }) {
     refreshLeagues().catch(e => setError(e.message))
     loadRuns()
     if (tab === 'historico') loadHistory()
+    if (tab === 'aprendizado') loadLearning()
   }, [tab])
 
   useEffect(() => () => clearInterval(batchTimer), [batchTimer])
+  useEffect(() => () => clearInterval(calTimer), [calTimer])
 
   async function loadRuns() {
     try { setRuns(await api.runs(token)) } catch {}
@@ -132,6 +139,39 @@ function Dashboard({ username, token, onLogout }) {
 
   async function loadHistory() {
     try { setHist(await api.predictions(token)) } catch (e) { setError(e.message) }
+  }
+
+  async function loadLearning() {
+    try { setLearn(await api.learningStatus(token)) } catch (e) { setError(e.message) }
+  }
+
+  async function startCalibration() {
+    setLoading(true); setError('')
+    try {
+      await api.learningCalibrate(token)
+      clearInterval(calTimer)
+      const t = setInterval(async () => {
+        try {
+          const s = await api.learningCalibrateStatus(token)
+          setCal(s)
+          if (!s.running) {
+            clearInterval(t); setCalTimer(null)
+            loadLearning()
+          }
+        } catch {}
+      }, 3000)
+      setCalTimer(t)
+      loadLearning()
+    } catch (e) { setError(e.message) }
+    setLoading(false)
+  }
+
+  async function runBacktest(leagueId) {
+    setBacktesting(true); setBacktest(null); setError('')
+    try {
+      setBacktest(await api.learningBacktest(leagueId, token))
+    } catch (e) { setError(e.message) }
+    setBacktesting(false)
   }
 
   async function startBatch() {
@@ -278,6 +318,7 @@ function Dashboard({ username, token, onLogout }) {
           <button className={tab === 'confronto' ? 'active' : ''} onClick={() => setTab('confronto')}>Confronto</button>
           <button className={tab === 'liga' ? 'active' : ''} onClick={() => setTab('liga')}>Ligas</button>
           <button className={tab === 'historico' ? 'active' : ''} onClick={() => setTab('historico')}>Histórico</button>
+          <button className={tab === 'aprendizado' ? 'active' : ''} onClick={() => setTab('aprendizado')}>Aprendizado</button>
           <button className={tab === 'scrape' ? 'active' : ''} onClick={() => setTab('scrape')}>Raspagem</button>
         </nav>
         <div className="user">
@@ -453,6 +494,77 @@ function Dashboard({ username, token, onLogout }) {
         </main>
       )}
 
+      {tab === 'aprendizado' && (
+        <main className="column">
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h3>🧠 Aprendizado do motor</h3>
+                <p className="muted small">Fator de mando (HA) e janela deslizante calibrados por liga via backtest honesto (prevê cada jogo usando só os jogos anteriores).</p>
+              </div>
+              <button className="btn-primary" onClick={startCalibration} disabled={loading || (cal && cal.running)}>
+                {cal && cal.running ? `Calibrando ${cal.done}/${cal.total}...` : '⚡ Recalibrar todas'}
+              </button>
+            </div>
+
+            {cal && cal.running && (
+              <div className="batch-progress">
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${cal.total ? (cal.done / cal.total) * 100 : 0}%` }} />
+                </div>
+                <p className="muted small">{cal.done}/{cal.total} ligas{cal.current ? ` · agora: ${cal.current}` : ''}</p>
+              </div>
+            )}
+
+            {learn && (
+              <>
+                <div className="hist-stats">
+                  <Stat label="Ligas calibradas" value={learn.calibrated_count} ok />
+                  <Stat label="Grid (HA)" value={learn.grid.home_advantage.map(String).join(', ')} />
+                  <Stat label="Janelas" value={learn.grid.window.map(String).join(', ')} />
+                </div>
+                <div className="table-scroll" style={{ marginTop: 14 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr><th>Liga</th><th>HA</th><th>Janela</th><th>Acurácia</th><th>Brier</th><th>Amostras</th><th>Calibrada</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {[...learn.calibrated]
+                        .sort((a, b) => (b.accuracy || 0) - (a.accuracy || 0))
+                        .map(lm => (
+                          <tr key={lm.league_id}>
+                            <td><b>{lm.name}</b></td>
+                            <td>{Number(lm.home_advantage).toFixed(2)}</td>
+                            <td>{lm.window}</td>
+                            <td>{lm.accuracy ? `${lm.accuracy.toFixed(1)}%` : '—'}</td>
+                            <td>{lm.brier ? lm.brier.toFixed(3) : '—'}</td>
+                            <td>{lm.sample_count}</td>
+                            <td>{lm.calibrated_at || '—'}</td>
+                            <td><button className="btn-small" onClick={() => runBacktest(lm.league_id)} disabled={backtesting}>Reavaliar</button></td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {backtest && (
+              <div className="card" style={{ marginTop: 14 }}>
+                <h4>📊 Backtest da liga</h4>
+                <div className="hist-stats">
+                  <Stat label="Amostras" value={backtest.total} />
+                  <Stat label="Acertos" value={backtest.correct} ok />
+                  <Stat label="Acurácia" value={`${backtest.accuracy.toFixed(1)}%`} ok />
+                  <Stat label="Brier" value={backtest.brier.toFixed(3)} />
+                </div>
+                <p className="muted small">Reavaliação com o modelo padrão (HA 1.15, janela 10).</p>
+              </div>
+            )}
+          </section>
+        </main>
+      )}
+
       {tab === 'scrape' && (
         <main className="column">
           <section className="panel">
@@ -532,7 +644,7 @@ function Stat({ label, value, ok, bad }) {
 }
 
 function PredictionView({ p, token, onSave }) {
-  const { match, lambdas, probs, top_scores, proposals, compare } = p
+  const { match, lambdas, probs, top_scores, proposals, compare, model } = p
   const [picked, setPicked] = useState(null)
 
   const pickOptions = useMemo(() => {
@@ -587,6 +699,14 @@ function PredictionView({ p, token, onSave }) {
           <b>{lambdas.home}</b> · <b>{lambdas.away}</b>
         </div>
       </div>
+
+      {model && (model.accuracy != null || model.home_advantage) && (
+        <div className="model-chip">
+          🧠 modelo {match.league}: HA {Number(model.home_advantage).toFixed(2)} · janela {model.window}
+          {model.accuracy != null && <> · acurácia {Number(model.accuracy).toFixed(1)}%</>}
+          {model.brier != null && <> · Brier {Number(model.brier).toFixed(3)}</>}
+        </div>
+      )}
 
       {compare && compare.h2h?.length > 0 && (
         <div className="card h2h">
