@@ -16,18 +16,27 @@ def _avg_stats(league_id: int, team_id: int) -> dict:
         "WHERE m.league_id=? AND ts.team_id=? AND m.status='played' "
         "ORDER BY m.match_date DESC LIMIT 10",
         (league_id, team_id))
-    if not rows:
-        # fallback: stats de jogos agendados (prévia)
-        rows = db.run_query(
-            "SELECT gf,ga,tg,ppg,gp FROM team_stats ts "
-            "JOIN matches m ON m.id=ts.match_id "
-            "WHERE m.league_id=? AND ts.team_id=? ORDER BY m.match_date DESC LIMIT 10",
-            (league_id, team_id))
-    if not rows:
-        return {"gf_avg": 1.2, "ga_avg": 1.2}
-    gf = sum(r["gf"] or 0 for r in rows) / len(rows)
-    ga = sum(r["ga"] or 0 for r in rows) / len(rows)
-    return {"gf_avg": round(gf, 3), "ga_avg": round(ga, 3)}
+    if rows:
+        gf = sum(r["gf"] or 0 for r in rows) / len(rows)
+        ga = sum(r["ga"] or 0 for r in rows) / len(rows)
+        return {"gf_avg": round(gf, 3), "ga_avg": round(ga, 3)}
+
+    # Fallback robusto: calcula médias reais de GF/GA a partir dos placares jogados.
+    gfs, gas = [], []
+    for m in db.run_query(
+            "SELECT ft_home, ft_away, home_team_id FROM matches "
+            "WHERE league_id=? AND (home_team_id=? OR away_team_id=?) "
+            "  AND status='played' AND ft_home IS NOT NULL "
+            "ORDER BY match_date DESC LIMIT 10",
+            (league_id, team_id, team_id)):
+        if m["home_team_id"] == team_id:
+            gfs.append(m["ft_home"]); gas.append(m["ft_away"])
+        else:
+            gfs.append(m["ft_away"]); gas.append(m["ft_home"])
+    if gfs:
+        return {"gf_avg": round(sum(gfs) / len(gfs), 3),
+                "ga_avg": round(sum(gas) / len(gas), 3)}
+    return {"gf_avg": 1.2, "ga_avg": 1.2}
 
 
 def _recent_form(league_id: int, team_id: int, limit: int = 5) -> list[dict]:

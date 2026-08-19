@@ -93,6 +93,12 @@ aside h3 { font-size: 12.5px; text-transform: uppercase; color: var(--muted); le
 .search:focus { outline: none; border-color: var(--accent); }
 
 .league-list { list-style: none; padding: 0; margin: 0; max-height: 70vh; overflow-y: auto; }
+.league-group { margin-bottom: 14px; }
+.league-group-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); font-weight: 700; padding: 4px 2px 6px;
+  border-bottom: 1px solid var(--border); margin-bottom: 8px;
+}
 .league-list li {
   padding: 10px 12px; margin-bottom: 7px; background: var(--panel);
   border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
@@ -123,6 +129,8 @@ td { padding: 8px; border-bottom: 1px solid var(--border); }
 .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
 .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
 .btn-block { width: 100%; }
+.btn-green { background: var(--ok); }
+.btn-green:hover:not(:disabled) { filter: brightness(1.1); }
 .btn-small {
   background: var(--panel2); color: var(--text); border: 1px solid var(--border);
   padding: 5px 11px; border-radius: 7px; cursor: pointer; font-size: 12px;
@@ -249,6 +257,9 @@ table.hist td { font-size: 12.5px; }
 .chip:hover:not(:disabled) { border-color: var(--accent); }
 .chip:disabled { opacity: .5; }
 .runs td, .runs th { font-size: 12.5px; }
+.batch-progress { margin: 14px 0; }
+.progress-track { height: 10px; background: var(--panel3); border-radius: 6px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--ok), var(--accent2)); transition: width .3s; }
 
 /* ---------- misc ---------- */
 .error { color: var(--danger); font-size: 13px; margin-bottom: 10px; }

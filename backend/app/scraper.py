@@ -9,8 +9,12 @@ Acesso passa no Cloudflare usando HTTP/2 (httpx.Client(http2=True)).
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
@@ -29,9 +33,99 @@ _MONTHS = {
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
 }
 
+# Lista padrão de ligas para raspagem em lote (arquivo leagues.txt)
+LEAGUES_FILE = Path(os.environ.get(
+    "AP2WEB_LEAGUES_FILE", Path(__file__).resolve().parent.parent / "leagues.txt"))
+
+# Nome amigável + país por código de liga do soccerstats
+LEAGUE_META = {
+    "portugal": ("Portugal - Liga Portugal", "Portugal"),
+    "portugal2": ("Portugal - Liga Portugal 2", "Portugal"),
+    "england": ("Inglaterra - Premier League", "England"),
+    "england2": ("Inglaterra - Championship", "England"),
+    "england3": ("Inglaterra - League One", "England"),
+    "england4": ("Inglaterra - League Two", "England"),
+    "spain": ("Espanha - LaLiga", "Spain"),
+    "spain2": ("Espanha - LaLiga 2", "Spain"),
+    "germany": ("Alemanha - Bundesliga", "Germany"),
+    "germany2": ("Alemanha - 2. Bundesliga", "Germany"),
+    "italy": ("Itália - Serie A", "Italy"),
+    "italy2": ("Itália - Serie B", "Italy"),
+    "france": ("França - Ligue 1", "France"),
+    "france2": ("França - Ligue 2", "France"),
+    "netherlands": ("Holanda - Eredivisie", "Netherlands"),
+    "netherlands2": ("Holanda - Eerste Divisie", "Netherlands"),
+    "argentina": ("Argentina - Liga Profesional", "Argentina"),
+    "austria": ("Áustria - Bundesliga", "Austria"),
+    "belgium": ("Bélgica - Pro League", "Belgium"),
+    "belgium2": ("Bélgica - Challenger Pro League", "Belgium"),
+    "bosnia": ("Bósnia - Premier Liga", "Bosnia"),
+    "brazil": ("Brasil - Série A", "Brazil"),
+    "brazil2": ("Brasil - Série B", "Brazil"),
+    "brazil3": ("Brasil - Série C", "Brazil"),
+    "bulgaria": ("Bulgária - Parva Liga", "Bulgaria"),
+    "chile": ("Chile - Liga de Primera", "Chile"),
+    "cyprus": ("Chipre - Cyprus League", "Cyprus"),
+    "colombia": ("Colômbia - Primera A", "Colombia"),
+    "croatia": ("Croácia - 1. HNL", "Croatia"),
+    "czechrepublic": ("Rep. Tcheca - 1. Liga", "Czech"),
+    "denmark": ("Dinamarca - Superligaen", "Denmark"),
+    "finland": ("Finlândia - Veikkausliiga", "Finland"),
+    "greece": ("Grécia - Super League", "Greece"),
+    "hungary": ("Hungria - NB I", "Hungary"),
+    "ireland": ("Irlanda - Premier Division", "Ireland"),
+    "mexico": ("México - Liga MX", "Mexico"),
+    "norway": ("Noruega - Eliteserien", "Norway"),
+    "poland": ("Polônia - Ekstraklasa", "Poland"),
+    "romania": ("Romênia - Liga 1", "Romania"),
+    "russia": ("Rússia - Premier League", "Russia"),
+    "scotland": ("Escócia - Premiership", "Scotland"),
+    "serbia": ("Sérvia - Super Liga", "Serbia"),
+    "sweden": ("Suécia - Allsvenskan", "Sweden"),
+    "switzerland": ("Suíça - Super League", "Switzerland"),
+    "turkey": ("Turquia - Super Lig", "Turkey"),
+    "ukraine": ("Ucrânia - Premier League", "Ukraine"),
+    "uruguay": ("Uruguai - Liga AUF Uruguaya", "Uruguay"),
+    "usa": ("EUA - MLS", "USA"),
+    "usa2": ("EUA - USL Championship", "USA"),
+    "australia3": ("Austrália - NPL Victoria", "Australia"),
+    "argentina3": ("Argentina - Primera Nacional", "Argentina"),
+    "belarus": ("Bielorrússia - Vysshaya Liga", "Belarus"),
+}
+
+# Estado global do job em lote (single worker por processo)
+_batch_state = {
+    "lock": threading.Lock(),
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "ok": 0,
+    "fail": 0,
+    "current": "",
+    "errors": [],
+    "started_at": None,
+    "finished_at": None,
+    "run_id": None,
+    "results": [],
+}
+
 
 class ScraperError(Exception):
     pass
+
+
+def default_league_codes() -> list[str]:
+    """Lê a lista de ligas do arquivo leagues.txt (ou padrão embutido)."""
+    codes = []
+    if LEAGUES_FILE.exists():
+        for line in LEAGUES_FILE.read_text(encoding="utf-8").splitlines():
+            c = line.strip()
+            if c and not c.startswith("#"):
+                codes.append(c)
+    if not codes:
+        codes = ["portugal", "england", "spain", "germany", "italy", "france",
+                 "netherlands", "brazil", "argentina"]
+    return codes
 
 
 def fetch(client: httpx.Client, path: str) -> str:
@@ -195,9 +289,18 @@ def _guess_year(month: int) -> int:
 # --------------------------------------------------------------------------
 
 def _get_or_create_league(conn, code: str, name: str = "", country: str = "") -> int:
+    meta_name, meta_country = LEAGUE_META.get(code.lower(), ("", ""))
+    if not name and meta_name:
+        name = meta_name
+    if not country and meta_country:
+        country = meta_country
     if code:
         row = conn.execute("SELECT id FROM leagues WHERE code=?", (code,)).fetchone()
         if row:
+            # atualiza nome/país se conhecemos o nome amigável
+            if meta_name:
+                conn.execute("UPDATE leagues SET name=?, country=? WHERE id=?",
+                             (name or meta_name, country or meta_country, row["id"]))
             return row["id"]
         cur = conn.execute("INSERT INTO leagues(code,name,country) VALUES(?,?,?)",
                            (code, name or code, country))
@@ -318,3 +421,70 @@ def scrape_league_results(league_code: str) -> dict:
     finally:
         conn.close()
         client.close()
+
+
+def _scrape_one(code: str) -> tuple:
+    """Raspa uma liga e persiste. Retorna (code, found, saved).
+    Cria seu próprio client httpx (não é thread-safe para compartilhar)."""
+    client = new_client()
+    conn = db.get_conn()
+    try:
+        html = fetch(client, f"/results.asp?league={code}&pmtype=bydate")
+        matches = parse_results_page(html, code)
+        counts = save_matches(conn, matches)
+        return code, counts["found"], counts["saved"]
+    finally:
+        conn.close()
+        client.close()
+
+
+def _run_batch_job() -> None:
+    """Executa a raspagem de todas as ligas da lista (thread de fundo)."""
+    codes = default_league_codes()
+    total = len(codes)
+    with _batch_state["lock"]:
+        _batch_state.update(running=True, total=total, done=0, ok=0, fail=0,
+                            current="", errors=[], started_at=datetime.now().isoformat(),
+                            finished_at=None, results=[])
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_scrape_one, c): c for c in codes}
+            for fut in futures:
+                code = futures[fut]
+                with _batch_state["lock"]:
+                    _batch_state["current"] = code
+                try:
+                    c, found, saved = fut.result()
+                    with _batch_state["lock"]:
+                        _batch_state["ok"] += 1
+                        _batch_state["results"].append({"league": c, "found": found, "saved": saved})
+                except Exception as e:
+                    with _batch_state["lock"]:
+                        _batch_state["fail"] += 1
+                        _batch_state["errors"].append({"league": code, "error": str(e)[:200]})
+                with _batch_state["lock"]:
+                    _batch_state["done"] += 1
+    finally:
+        with _batch_state["lock"]:
+            _batch_state["running"] = False
+            _batch_state["current"] = ""
+            _batch_state["finished_at"] = datetime.now().isoformat()
+
+
+def start_batch_scrape() -> dict:
+    """Inicia a raspagem em lote (não bloqueia). Retorna o estado inicial."""
+    with _batch_state["lock"]:
+        if _batch_state["running"]:
+            return {k: _batch_state[k] for k in
+                    ("running", "total", "done", "ok", "fail", "current",
+                     "errors", "started_at", "finished_at", "results")}
+        thread = threading.Thread(target=_run_batch_job, daemon=True)
+        thread.start()
+    return batch_status()
+
+
+def batch_status() -> dict:
+    with _batch_state["lock"]:
+        return {k: _batch_state[k] for k in
+                ("running", "total", "done", "ok", "fail", "current",
+                 "errors", "started_at", "finished_at", "results")}

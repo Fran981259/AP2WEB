@@ -117,6 +117,17 @@ def scrape_league(body: ScrapeLeagueBody, user: str = Depends(current_user)):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.post("/api/scrape/batch", tags=["scrape"])
+def scrape_batch(user: str = Depends(current_user)):
+    """Inicia a raspagem de todas as ligas da lista em background."""
+    return scraper.start_batch_scrape()
+
+
+@app.get("/api/scrape/batch/status", tags=["scrape"])
+def scrape_batch_status(user: str = Depends(current_user)):
+    return scraper.batch_status()
+
+
 @app.get("/api/runs", tags=["scrape"])
 def runs(user: str = Depends(current_user)):
     return [dict(r) for r in db.run_query(

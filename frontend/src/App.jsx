@@ -111,6 +111,8 @@ function Dashboard({ username, token, onLogout }) {
 
   const [hist, setHist] = useState(null)
   const [leagueSearch, setLeagueSearch] = useState('')
+  const [batch, setBatch] = useState(null)
+  const [batchTimer, setBatchTimer] = useState(null)
 
   async function refreshLeagues() {
     setLeagues(await api.leagues(token))
@@ -122,12 +124,36 @@ function Dashboard({ username, token, onLogout }) {
     if (tab === 'historico') loadHistory()
   }, [tab])
 
+  useEffect(() => () => clearInterval(batchTimer), [batchTimer])
+
   async function loadRuns() {
     try { setRuns(await api.runs(token)) } catch {}
   }
 
   async function loadHistory() {
     try { setHist(await api.predictions(token)) } catch (e) { setError(e.message) }
+  }
+
+  async function startBatch() {
+    setLoading(true); setError('')
+    try {
+      const st = await api.scrapeBatch(token)
+      setBatch(st)
+      clearInterval(batchTimer)
+      const t = setInterval(async () => {
+        try {
+          const s = await api.scrapeBatchStatus(token)
+          setBatch(s)
+          if (!s.running) {
+            clearInterval(t); setBatchTimer(null)
+            refreshLeagues()
+            loadRuns()
+          }
+        } catch {}
+      }, 3000)
+      setBatchTimer(t)
+    } catch (e) { setError(e.message) }
+    setLoading(false)
   }
 
   async function onCfLeagueChange(leagueId) {
@@ -232,6 +258,16 @@ function Dashboard({ username, token, onLogout }) {
       l.name.toLowerCase().includes(q) || (l.country || '').toLowerCase().includes(q))
   }, [leagues, leagueSearch])
 
+  const groupedByCountry = useMemo(() => {
+    const groups = {}
+    for (const l of filteredLeagues) {
+      const key = l.country || 'Outros'
+      if (!groups[key]) groups[key] = []
+      groups[key].push(l)
+    }
+    return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [filteredLeagues])
+
   const selLeagueObj = selLeague ? leagues.find(l => l.id === selLeague) : null
 
   return (
@@ -316,18 +352,23 @@ function Dashboard({ username, token, onLogout }) {
       {tab === 'liga' && (
         <main>
           <aside>
-            <h3>Ligas no banco</h3>
+            <h3>Ligas no banco <span className="muted small">({leagues.length})</span></h3>
             <input className="search" placeholder="🔎 Buscar liga ou país..."
                    value={leagueSearch} onChange={e => setLeagueSearch(e.target.value)} />
             {filteredLeagues.length === 0 && <p className="muted">Nenhuma liga. Rape uma liga ou os jogos de hoje.</p>}
-            <ul className="league-list">
-              {filteredLeagues.map(l => (
-                <li key={l.id} className={selLeague === l.id ? 'active' : ''} onClick={() => selectLeague(l.id)}>
-                  <span className="name">{flag(l.country)} {l.name}</span>
-                  <span className="meta">{l.matches} jogos · {l.scheduled} agendados</span>
-                </li>
-              ))}
-            </ul>
+            {groupedByCountry.map(([country, list]) => (
+              <div key={country} className="league-group">
+                <div className="league-group-title">{flag(country)} {country} <span className="muted small">({list.length})</span></div>
+                <ul className="league-list">
+                  {list.map(l => (
+                    <li key={l.id} className={selLeague === l.id ? 'active' : ''} onClick={() => selectLeague(l.id)}>
+                      <span className="name">{l.name}</span>
+                      <span className="meta">{l.matches} jogos · {l.scheduled} agendados</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </aside>
 
           <section className="content">
@@ -420,8 +461,31 @@ function Dashboard({ username, token, onLogout }) {
               <button className="btn-primary" onClick={runScrapeToday} disabled={loading}>
                 {loading ? 'Raspando...' : '📥 Raspar jogos de hoje'}
               </button>
-              <span className="muted small">Coleta todas as ligas da página de jogos de hoje, com estatísticas por time.</span>
+              <button className="btn-primary btn-green" onClick={startBatch} disabled={loading || (batch && batch.running)}>
+                {batch && batch.running ? `Raspando ${batch.done}/${batch.total}...` : '⚡ Raspar TODAS as ligas'}
+              </button>
+              <span className="muted small">Raspa os resultados (FT/HT) de todas as {batch?.total || 49} ligas da lista.</span>
             </div>
+
+            {batch && batch.running && (
+              <div className="batch-progress">
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${batch.total ? (batch.done / batch.total) * 100 : 0}%` }} />
+                </div>
+                <p className="muted small">
+                  {batch.done}/{batch.total} ligas · {batch.ok} ok · {batch.fail} falhas
+                  {batch.current ? ` · agora: ${batch.current}` : ''}
+                </p>
+              </div>
+            )}
+
+            {batch && !batch.running && batch.finished_at && (
+              <p className="muted small">
+                ✅ Última raspagem em lote: {batch.ok} ligas ok, {batch.fail} falhas.
+                {batch.errors?.length > 0 && <> Falhas: {batch.errors.map(e => e.league).join(', ')}</>}
+              </p>
+            )}
+
             <div className="league-codes">
               {['argentina3', 'brazil2', 'spain', 'england', 'germany', 'italy', 'france'].map(c => (
                 <button key={c} className="chip" onClick={() => runScrapeLeague(c)} disabled={loading}>

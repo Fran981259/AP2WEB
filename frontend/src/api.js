@@ -32,6 +32,8 @@ export const api = {
   },
   scrapeToday(token) { return this.request('/scrape/today', { method: 'POST', token }) },
   scrapeLeague(code, token) { return this.request('/scrape/league', { method: 'POST', body: { league: code }, token }) },
+  scrapeBatch(token) { return this.request('/scrape/batch', { method: 'POST', token }) },
+  scrapeBatchStatus(token) { return this.request('/scrape/batch/status', { token }) },
   runs(token) { return this.request('/runs', { token }) },
   predictions(token) { return this.request('/predictions', { token }) },
   savePrediction(data, token) { return this.request('/predictions', { method: 'POST', body: data, token }) },
