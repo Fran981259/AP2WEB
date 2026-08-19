@@ -25,9 +25,11 @@ RUN python3 -m venv /opt/venv \
     || /opt/venv/bin/pip install --no-cache-dir --retries 10 --timeout 60 -q -r backend/requirements.txt
 
 ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONPATH="/app" \
+    PYTHONPATH="/app/backend" \
     AP2WEB_ORIGINS="http://localhost:5173" \
     AP2WEB_SECRET="change-me-in-production"
+
+WORKDIR /app/backend
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
