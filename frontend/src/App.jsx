@@ -188,12 +188,29 @@ function Dashboard({ username, token, onLogout }) {
             clearInterval(t); setBatchTimer(null)
             refreshLeagues()
             loadRuns()
+            if (s.auto_calibrate && s.ok > 0) watchCalibration()
           }
         } catch {}
       }, 3000)
       setBatchTimer(t)
     } catch (e) { setError(e.message) }
     setLoading(false)
+  }
+
+  async function watchCalibration() {
+    clearInterval(calTimer)
+    const t = setInterval(async () => {
+      try {
+        const s = await api.learningCalibrateStatus(token)
+        setCal(s)
+        if (!s.running) {
+          clearInterval(t); setCalTimer(null)
+          loadLearning()
+        }
+      } catch {}
+    }, 3000)
+    setCalTimer(t)
+    loadLearning()
   }
 
   async function onCfLeagueChange(leagueId) {
@@ -507,6 +524,10 @@ function Dashboard({ username, token, onLogout }) {
               </button>
             </div>
 
+            {learn && <NeuralNet learn={learn} cal={cal} />}
+
+            {!learn && <div className="muted small" style={{ padding: '14px 0' }}>Carregando estado do aprendizado...</div>}
+
             {cal && cal.running && (
               <div className="batch-progress">
                 <div className="progress-track">
@@ -639,6 +660,74 @@ function Stat({ label, value, ok, bad }) {
     <div className={`stat ${ok ? 'ok' : ''} ${bad ? 'bad' : ''}`}>
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
+    </div>
+  )
+}
+
+function NeuralNet({ learn, cal }) {
+  const running = cal?.running || false
+  const total = learn?.calibrated?.length || 0
+  const acc = total ? learn.calibrated.reduce((s, m) => s + (m.accuracy || 0), 0) / total : 0
+  const grid = learn?.grid?.home_advantage?.length || 7
+  const layers = [grid, Math.max(8, Math.min(16, Math.round(total / 4))), 3]
+  const xs = [70, 190, 310]
+  const cols = ['#22d3ee', '#4ade80', '#a78bfa']
+  const ys = []
+  layers.forEach((n, li) => {
+    const arr = []
+    for (let i = 0; i < n; i++) arr.push(40 + (220 / (n - 1 || 1)) * i)
+    ys.push(arr)
+  })
+  const edges = []
+  for (let l = 0; l < 2; l++) {
+    ys[l].forEach((a, i) => {
+      ys[l + 1].forEach((b, j) => {
+        edges.push({ x1: xs[l], y1: a, x2: xs[l + 1], y2: b, k: (i + j) % 5 })
+      })
+    })
+  }
+  const nodes = []
+  for (let l = 0; l < 3; l++) {
+    ys[l].forEach((y, i) => {
+      const active = running || (l === 0 ? i < grid : l === 1 ? i < Math.ceil(total / 4) : i < 2)
+      nodes.push({ x: xs[l], y, l, active })
+    })
+  }
+  return (
+    <div className="neural-wrap">
+      <svg viewBox="0 0 380 300" className="neural">
+        <defs>
+          <linearGradient id="ng" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stopColor="#22d3ee" />
+            <stop offset="1" stopColor="#a78bfa" />
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="380" height="300" rx="14" fill="rgba(8,10,24,.6)" stroke="rgba(148,163,184,.18)" />
+        {edges.map((e, i) => (
+          <line key={i} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2}
+                stroke={cols[e.k % 3]} strokeOpacity={running ? 0.25 : 0.12} strokeWidth="1"
+                className={running ? 'nn-edge' : ''} style={{ animationDelay: `${(e.k * 0.15).toFixed(2)}s` }} />
+        ))}
+        {nodes.map((n, i) => (
+          <g key={i}>
+            <circle cx={n.x} cy={n.y} r="7" fill={cols[n.l]} className={n.active && running ? 'nn-node' : ''}
+                    style={n.active && running ? { animationDelay: `${(n.y * 0.01).toFixed(2)}s` } : {}} />
+            <circle cx={n.x} cy={n.y} r="7" fill="none" stroke={cols[n.l]}
+                    strokeOpacity={n.active ? 0.9 : 0.28} strokeWidth="1.5" />
+          </g>
+        ))}
+        <text x="70" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">entrada</text>
+        <text x="190" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">oculta</text>
+        <text x="310" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">saída</text>
+      </svg>
+      <div className="neural-meta">
+        <span className="neural-dot" style={{ background: '#4ade80' }}></span>
+        <span className="muted small">{total} ligas calibradas</span>
+        <span className="neural-dot" style={{ background: '#22d3ee' }}></span>
+        <span className="muted small">acurácia média {acc.toFixed(1)}%</span>
+        <span className="neural-dot" style={{ background: running ? '#fbbf24' : '#64748b' }}></span>
+        <span className="muted small">{running ? `aprendendo ${cal.done}/${cal.total}...` : 'em repouso'}</span>
+      </div>
     </div>
   )
 }

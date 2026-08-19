@@ -107,6 +107,7 @@ _batch_state = {
     "finished_at": None,
     "run_id": None,
     "results": [],
+    "auto_calibrate": True,
 }
 
 
@@ -469,6 +470,13 @@ def _run_batch_job() -> None:
             _batch_state["running"] = False
             _batch_state["current"] = ""
             _batch_state["finished_at"] = datetime.now().isoformat()
+    # aprendizado autônomo: ao terminar a raspagem, recalibra o motor sozinho
+    if _batch_state["auto_calibrate"] and _batch_state["ok"] > 0:
+        try:
+            from .learning import start_calibration
+            start_calibration()
+        except Exception:
+            pass
 
 
 def start_batch_scrape() -> dict:
@@ -477,7 +485,7 @@ def start_batch_scrape() -> dict:
         if _batch_state["running"]:
             return {k: _batch_state[k] for k in
                     ("running", "total", "done", "ok", "fail", "current",
-                     "errors", "started_at", "finished_at", "results")}
+                     "errors", "started_at", "finished_at", "results", "auto_calibrate")}
         thread = threading.Thread(target=_run_batch_job, daemon=True)
         thread.start()
     return batch_status()
@@ -487,4 +495,4 @@ def batch_status() -> dict:
     with _batch_state["lock"]:
         return {k: _batch_state[k] for k in
                 ("running", "total", "done", "ok", "fail", "current",
-                 "errors", "started_at", "finished_at", "results")}
+                 "errors", "started_at", "finished_at", "results", "auto_calibrate")}
