@@ -21,7 +21,8 @@ COPY backend backend/
 COPY --from=build /app/frontend/dist frontend/dist
 
 RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -q -r backend/requirements.txt
+    && /opt/venv/bin/pip install --no-cache-dir --retries 10 --timeout 60 -q -r backend/requirements.txt \
+    || /opt/venv/bin/pip install --no-cache-dir --retries 10 --timeout 60 -q -r backend/requirements.txt
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app" \
