@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from . import db, scraper
 from .auth import authenticate, create_user, current_user
 from .history import delete_prediction, list_predictions, save_prediction, stats
+from .learning import (backtest_league, calibrate_league, calibration_status,
+                       model_status, start_calibration)
 from .prediction import predict_league_upcoming, predict_match, predict_fixture
 
 app = FastAPI(title="AP2WEB", version="0.1.0")
@@ -210,6 +212,45 @@ def get_predictions(user: str = Depends(current_user)):
 def remove_prediction(prediction_id: int, user: str = Depends(current_user)):
     delete_prediction(_user_id(user), prediction_id)
     return {"ok": True}
+
+
+# --------------------------- aprendizado / calibração ---------------------------
+
+@app.post("/api/learning/calibrate", tags=["learning"])
+def learning_calibrate(user: str = Depends(current_user)):
+    """Inicia a calibração de todas as ligas em background."""
+    return start_calibration()
+
+
+@app.post("/api/learning/calibrate/{league_id}", tags=["learning"])
+def learning_calibrate_league(league_id: int, user: str = Depends(current_user)):
+    r = calibrate_league(league_id)
+    if not r:
+        raise HTTPException(status_code=400, detail="Liga sem dados suficientes")
+    return r
+
+
+@app.get("/api/learning/calibrate/status", tags=["learning"])
+def learning_calibrate_status(user: str = Depends(current_user)):
+    return calibration_status()
+
+
+@app.post("/api/learning/calibrate/{league_id}", tags=["learning"])
+def learning_calibrate_league(league_id: int, user: str = Depends(current_user)):
+    r = calibrate_league(league_id)
+    if not r:
+        raise HTTPException(status_code=400, detail="Liga sem dados suficientes")
+    return r
+
+
+@app.get("/api/learning/status", tags=["learning"])
+def learning_status(user: str = Depends(current_user)):
+    return model_status()
+
+
+@app.get("/api/learning/backtest/{league_id}", tags=["learning"])
+def learning_backtest(league_id: int, user: str = Depends(current_user)):
+    return backtest_league(league_id)
 
 
 @app.get("/api/health", tags=["misc"])

@@ -107,6 +107,16 @@ CREATE TABLE IF NOT EXISTS predictions (
 
 CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
 CREATE INDEX IF NOT EXISTS idx_predictions_match ON predictions(match_id);
+
+CREATE TABLE IF NOT EXISTS league_models (
+    league_id INTEGER PRIMARY KEY REFERENCES leagues(id) ON DELETE CASCADE,
+    home_advantage REAL NOT NULL DEFAULT 1.15,   -- fator de mando calibrado por liga
+    window INTEGER NOT NULL DEFAULT 10,          -- janela deslizante ótima (últimos N jogos)
+    accuracy REAL,                               -- acurácia 1X2 no backtest (0-100)
+    brier REAL,                                  -- Brier score (menor = melhor)
+    sample_count INTEGER,                        -- nº de jogos usados no backtest
+    calibrated_at TEXT
+);
 """
 
 

@@ -6,16 +6,17 @@ seguindo o conhecimento extraído da planilha AP 2.0 (núcleo: λ = ataque × de
 from __future__ import annotations
 
 from . import db
+from .learning import get_model
 from .model import MatchInput, TeamInput, predict as run_predict
 
 
-def _avg_stats(league_id: int, team_id: int) -> dict:
+def _avg_stats(league_id: int, team_id: int, window: int = 10) -> dict:
     rows = db.run_query(
         "SELECT gf,ga,tg,ppg,gp FROM team_stats ts "
         "JOIN matches m ON m.id=ts.match_id "
         "WHERE m.league_id=? AND ts.team_id=? AND m.status='played' "
-        "ORDER BY m.match_date DESC LIMIT 10",
-        (league_id, team_id))
+        "ORDER BY m.match_date DESC LIMIT ?",
+        (league_id, team_id, window))
     if rows:
         gf = sum(r["gf"] or 0 for r in rows) / len(rows)
         ga = sum(r["ga"] or 0 for r in rows) / len(rows)
@@ -27,8 +28,8 @@ def _avg_stats(league_id: int, team_id: int) -> dict:
             "SELECT ft_home, ft_away, home_team_id FROM matches "
             "WHERE league_id=? AND (home_team_id=? OR away_team_id=?) "
             "  AND status='played' AND ft_home IS NOT NULL "
-            "ORDER BY match_date DESC LIMIT 10",
-            (league_id, team_id, team_id)):
+            "ORDER BY match_date DESC LIMIT ?",
+            (league_id, team_id, team_id, window)):
         if m["home_team_id"] == team_id:
             gfs.append(m["ft_home"]); gas.append(m["ft_away"])
         else:
@@ -37,6 +38,11 @@ def _avg_stats(league_id: int, team_id: int) -> dict:
         return {"gf_avg": round(sum(gfs) / len(gfs), 3),
                 "ga_avg": round(sum(gas) / len(gas), 3)}
     return {"gf_avg": 1.2, "ga_avg": 1.2}
+
+
+def _model_for(league_id: int) -> dict:
+    """Parâmetros calibrados da liga (fator de mando + janela)."""
+    return get_model(league_id)
 
 
 def _recent_form(league_id: int, team_id: int, limit: int = 5) -> list[dict]:
@@ -119,15 +125,16 @@ def predict_match(match_id: int) -> dict:
         "JOIN teams ta ON ta.id=m.away_team_id "
         "WHERE m.id=?", (match_id,))[0]
 
-    home_stats = _avg_stats(m["league_id"], m["home_team_id"])
-    away_stats = _avg_stats(m["league_id"], m["away_team_id"])
+    model = _model_for(m["league_id"])
+    home_stats = _avg_stats(m["league_id"], m["home_team_id"], model["window"])
+    away_stats = _avg_stats(m["league_id"], m["away_team_id"], model["window"])
 
     mi = MatchInput(
         league=m["league_name"],
         home=TeamInput(name=m["home_name"], **home_stats),
         away=TeamInput(name=m["away_name"], **away_stats),
     )
-    result = run_predict(mi)
+    result = run_predict(mi, home_advantage=model["home_advantage"])
 
     return {
         "match": {
@@ -148,6 +155,8 @@ def predict_match(match_id: int) -> dict:
         "inputs": {"home": home_stats, "away": away_stats},
         "compare": _compare(m["league_id"], m["home_team_id"], m["away_team_id"],
                             m["home_name"], m["away_name"], home_stats, away_stats),
+        "model": {"home_advantage": model["home_advantage"], "window": model["window"],
+                  "accuracy": model.get("accuracy"), "brier": model.get("brier")},
     }
 
 
@@ -168,15 +177,16 @@ def predict_fixture(league_id: int, home_team_id: int, away_team_id: int) -> dic
     if not names or home_team_id not in names or away_team_id not in names:
         raise IndexError("Confronto não encontrado")
 
-    home_stats = _avg_stats(league_id, home_team_id)
-    away_stats = _avg_stats(league_id, away_team_id)
+    model = _model_for(league_id)
+    home_stats = _avg_stats(league_id, home_team_id, model["window"])
+    away_stats = _avg_stats(league_id, away_team_id, model["window"])
 
     mi = MatchInput(
         league=l["name"],
         home=TeamInput(name=names[home_team_id], **home_stats),
         away=TeamInput(name=names[away_team_id], **away_stats),
     )
-    result = run_predict(mi)
+    result = run_predict(mi, home_advantage=model["home_advantage"])
 
     return {
         "match": {
@@ -197,4 +207,6 @@ def predict_fixture(league_id: int, home_team_id: int, away_team_id: int) -> dic
         "inputs": {"home": home_stats, "away": away_stats},
         "compare": _compare(league_id, home_team_id, away_team_id,
                             names[home_team_id], names[away_team_id], home_stats, away_stats),
+        "model": {"home_advantage": model["home_advantage"], "window": model["window"],
+                  "accuracy": model.get("accuracy"), "brier": model.get("brier")},
     }
