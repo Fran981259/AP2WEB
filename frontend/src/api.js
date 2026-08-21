@@ -1,4 +1,6 @@
 const API = '/api'
+const TOKEN_KEY = 'ap2web_token'
+const USER_KEY = 'ap2web_user'
 
 export const api = {
   async request(path, { method = 'GET', body, token } = {}) {
@@ -10,6 +12,12 @@ export const api = {
       },
       body: body ? JSON.stringify(body) : undefined
     })
+    if (res.status === 401 && token) {
+      localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(USER_KEY)
+      window.location.reload()
+      throw new Error('Sessão expirada')
+    }
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data.detail || `Erro ${res.status}`)
     return data
@@ -21,7 +29,6 @@ export const api = {
     return this.request('/register', { method: 'POST', body: { username, password } })
   },
   leagues(token) { return this.request('/leagues', { token }) },
-  dataOverview(token) { return this.request('/data/overview', { token }) },
   leagueMatches(id, token) { return this.request(`/leagues/${id}/matches`, { token }) },
   leagueTeams(id, token) { return this.request(`/leagues/${id}/teams`, { token }) },
   prediction(id, token) { return this.request(`/matches/${id}/prediction`, { token }) },
@@ -31,16 +38,19 @@ export const api = {
       body: { league_id: leagueId, home_team_id: homeId, away_team_id: awayId }
     })
   },
-  scrapeToday(token) { return this.request('/scrape/today', { method: 'POST', token }) },
-  scrapeLeague(code, token) { return this.request('/scrape/league', { method: 'POST', body: { league: code }, token }) },
-  scrapeBatch(token) { return this.request('/scrape/batch', { method: 'POST', token }) },
-  scrapeBatchStatus(token) { return this.request('/scrape/batch/status', { token }) },
-  runs(token) { return this.request('/runs', { token }) },
   learningStatus(token) { return this.request('/learning/status', { token }) },
   learningCalibrate(token) { return this.request('/learning/calibrate', { method: 'POST', body: {}, token }) },
   learningCalibrateStatus(token) { return this.request('/learning/calibrate/status', { token }) },
   learningBacktest(leagueId, token) { return this.request(`/learning/backtest/${leagueId}`, { token }) },
+  learningCurve(token) { return this.request('/learning/curve', { token }) },
   predictions(token) { return this.request('/predictions', { token }) },
   savePrediction(data, token) { return this.request('/predictions', { method: 'POST', body: data, token }) },
-  deletePrediction(id, token) { return this.request(`/predictions/${id}`, { method: 'DELETE', token }) }
+  deletePrediction(id, token) { return this.request(`/predictions/${id}`, { method: 'DELETE', token }) },
+  sofascoreSync(token) { return this.request('/sofascore/sync', { method: 'POST', body: {}, token }) },
+  sofascoreSyncLeague(leagueId, token) { return this.request(`/sofascore/sync/league/${leagueId}`, { method: 'POST', body: {}, token }) },
+  sofascoreStatus(token) { return this.request('/sofascore/status', { token }) },
+  sofascoreData(leagueId, token) {
+    const qs = leagueId ? `?league_id=${leagueId}` : ''
+    return this.request(`/sofascore/data${qs}`, { token })
+  }
 }

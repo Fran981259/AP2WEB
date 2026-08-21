@@ -1,0 +1,258 @@
+# Technical Audit — AP2WEB (Backend + Frontend)
+
+## 1. BACKEND ARQUITETURA
+
+### 1.1 Linguagem e Framework
+- **Linguagem**: Python 3.x
+- **Framework**: FastAPI 0.141.1 (moderno, assíncrono, automatic docs OpenAPI)
+- **Servidor ASGI**: Uvicorn 0.52.3 (development), produção via Docker/Render
+
+### 1.2 Dependências Principais
+| Pacote | Versão | Finalidade |
+|--------|--------|------------|
+| fastapi | 0.141.1 | API framework |
+| uvicorn | 0.52.3 | ASGI server |
+| httpx | 0.28.1 | HTTP client assíncrono (Sofascore API) |
+| PyJWT | 2.13.0 | JWT tokens |
+| h2 | 4.4.1 | HTTP/2 support |
+| lxml | 6.1.1 | XML/HTML parser (soccerdata) |
+| beautifulsoup4 | 4.15.0 | Web scraping |
+| sqlitedict / sqlite3 nativo | — | Banco de dados |
+| soccerdata | — (import only) | Wrapper Sofascore |
+
+**Ausentes propositadamente**: SQLAlchemy ORM, Redis, Celery, OAuth2, rate-limiter.
+
+### 1.3 Banco de Dados
+- **Sistema**: SQLite 3 (arquivo `ap2web.db`)
+- **Modo**: `PRAGMA journal_mode=WAL` (escrita concorrente segura)
+- **Timeouts**: `busy_timeout=60000`, `connect_timeout=60`
+- **ORM**: **Nenhum** — queries manuais via `sqlite3` (`db.py:run_query`, `db.run_exec`)
+- **Schema** (`db.py:12-123`): 6 tabelas
+  - `users` (id, username UNIQUE, password_hash, created_at)
+  - `leagues` (id, sofascore_id UNIQUE, name, country, season_id, season_name, last_sync, created_at)
+  - `teams` (id, league_id FK, sofascore_id, name, UNIQUE(league_id, sofascore_id))
+  - `matches` (127 colunas incluindo xG, posse, chutes, cartões, etc.; FK para leagues/teams; UNIQUE(league_id, sofascore_id))
+  - `predictions` (user picks com status pending/correct/wrong)
+  - `league_models` (calibração por liga: home_advantage, window, feature, accuracy, brier, sample_count)
+
+**Indexes**: `idx_matches_league`, `idx_matches_date`, `idx_matches_status`, `idx_predictions_status`, `idx_predictions_match`
+
+### 1.4 Arquitetura de Sincronização
+- **Threading**: Daemon threads (`threading.Thread(daemon=True)`) para sync e calibração
+- **Sofascore sync** (`sofascore_data.py`): `_run_sync()` itera sobre `LEAGUES` list, cria `httpx.Client` por thread, respeita rate limit (cooldown ~20min após ~5-13 ligas)
+- **Rate limit**: Bloqueia com `ConnectionError` no endpoint `/seasons`; GAP de 10s+ entre ligas ajuda
+- **soccerdata**: Apenas no `.venv` (`backend/.venv/bin/python`), sistema `python3` não importa
+
+### 1.5 Motor de Aprendizado (Learning Engine)
+Arquivo: `learning.py:334 linhas`
+
+**Parâmetros otimizados por liga** (armazenados em `league_models`):
+- `home_advantage`: float em grade `[1.0, 1.05, ..., 1.30]` (7 valores)
+- `window`: int em grade `[5, 8, 10, 12, 15]` (5 valores) — jogos recentes para média
+- `feature`: `"xg"` | `"goals"` | `"blend"` (média simples xG + gols)
+
+**Metodologia**:
+1. **Backtest honesto**: para cada jogo N, usa apenas jogos 1..N-1 (sem vazamento)
+2. **Grid search**: testa todas as combinações (7×5×3 = 105 por liga)
+3. **Métricas**:
+   - **Acurácia 1X2**: % onde o favorito (maior prob.) acertou resultado
+   - **Brier score**: erro quadrático médio das probs 1X2 vs resultado real (penaliza confiança excessiva)
+4. **MIN_SAMPLES=30**: ligas com < 30 jogos jogados são puladas
+5. **Storage**: melhor combinação salva em `league_models` por `league_id`
+
+**Funções chave**:
+- `backtest_league(league_id, ha, window, feature)` — retorna acurácia, Brier, series de curva
+- `calibrate_league(league_id)` — grid search + persiste modelo
+- `calibrate_all()` — iterar todas as ligas, pula as que têm < 30 jogos
+- `model_status()` — retorna status de todas as ligas
+- `motor_curve(buckets=20)` — curva de aprendizado acumulada média por % temporada, ponderada por amostras
+
+### 1.6 Serviço de Previsão
+Arquivo: `prediction.py:244 linhas`
+
+**Fluimento**:
+1. `_model_for(league_id)` → chama `get_model()` → busca `league_models` ou usa fallback `xg/1.15/10`
+2. `_avg_stats(league_id, team_id, window, feature)` → média de gf/ga dos últimos N jogos
+3. `_window_values()` → extrai xG ou gols dependendo da feature
+4. `_build()` → monta `MatchInput` → chama `model.py:run_predict()` com `home_advantage`
+5. Retorna: lambdas, probs 1X2, top_scores, proposals (1X2, Over/Under, BTTS, placar), compare H2H, form, recent games
+
+**Endpoints**:
+- `predict_match(match_id)` — previsão para partida existente
+- `predict_league_upcoming(league_id, limit=10)` — próximas partidas da liga
+- `predict_fixture(league_id, home_id, away_id)` — previsão de confronto arbitrário (usado pelo frontend)
+
+### 1.7 Histórico de Previsões
+Arquivo: `history.py:141 linhas`
+
+- `save_prediction()` — insere linha `predictions` + valida resolução imediata
+- `resolve_predictions()` — verifica se match tem placar final, atualiza status para `correct`/`wrong`
+- `list_predictions()`, `stats()` — relatório de acertos/erros por usuário
+- Pick types: `1X2`, `GOLS`, `BTTS`, `PLACAR`
+
+### 1.8 Autenticação e Segurança
+- **JWT** (HS256) em `auth.py`
+- **Password hashing**: PBKDF2-SHA256 com 100k iterações
+- **Token**: armazenado em `localStorage` no frontend, enviado via `Authorization: Bearer <token>`
+- **401 handling**: frontend limpa storage e recarrega página
+- **CORS**: configurado via env `AP2WEB_ORIGINS` (padrão: localhost:5173 + produção)
+
+### 1.9 Endpoints API Completa (FastAPI)
+Ver `main.py:261 linhas` — ~45 endpoints em categorias:
+- **Auth**: register, login, me
+- **Sofascore**: sync (todas/liga específica), status, data
+- **Data**: leagues, leagues/{id}/teams, leagues/{id}/matches, matches/{id}/prediction
+- **Prediction**: predict/fixture, league predictions, save/delete predictions
+- **Learning**: calibrate (todas/liga), status, backtest, curve, health
+- **Misc**: health check, SPA fallback (produção)
+
+---
+
+## 2. FRONTEND ARQUITETURA
+
+### 2.1 Tecnologia da Cliente
+- **React**: 18.3.1 (function components + hooks, Nenhum class component)
+- **Renderização**: `ReactDOM.createRoot()` (API v18)
+- **Módulo**: ES module (`"type": "module"` em `package.json`)
+- **Build**: Vite 5.4.21 (dev server + production build)
+- **Plugin**: `@vitejs/plugin-react` (transform JSX, HMR)
+
+### 2.2 Arquitetura de Arquivos
+```
+frontend/
+├─ index.html          # scaffold mínimo (div#root)
+├─ package.json        # deps, scripts dev/build/preview
+├─ vite.config.js      # proxy /api → localhost:8000, plugin react
+├─ src/
+│  ├─ main.jsx         # entrypoint → ReactDOM.createRoot(<App />)
+│  ├─ api.js           # wrapper fetch com auth + 401 handling
+│  ├─ App.jsx          # 857 linhas — componente único raiz
+│  └─ styles.css       # 368 linhas — CSS custom properties, responsive
+```
+
+### 2.3 Gerenciamento de Estado
+- **React Hooks**: `useState` (extenso), `useEffect`, `useMemo`, `useState`
+- **Persistência**: `localStorage` (TOKEN_KEY, USER_KEY)
+- **Sem Redux/MobX/Context global**: estado é local ou persistido
+- **Memos principais**:
+  - `filteredLeagues` — filtro de busca
+  - `groupedByContinent` — agrupamento Europa/América do Sul/... com ordenação customizada
+
+### 2.4 Integração com API
+- **Base URL**: `/api` — proxy Vite para `http://localhost:8000` em dev
+- **Autenticação**: header `Authorization: Bearer <token>` quando token presente
+- **Tratamento 401**: limpa storage + recarrega página
+- **Endpoints consumidos** (api.js:56 linhas):
+  - Auth: `/login`, `/register`
+  - Data: `/leagues`, `/leagues/:id/matches`, `/leagues/:id/teams`
+  - Prediction: `/predict/fixture`, `/matches/:id/prediction`, `/predictions`
+  - Learning: `/learning/status`, `/learning/calibrate`, `/learning/calibrate/status`, `/learning/backtest/:id`, `/learning/curve`
+  - Sofascore: `/sofascore/sync`, `/sofascore/sync/league/:id`, `/sofascore/status`, `/sofascore/data`
+
+### 2.5 UI/UX Design
+- **Estilização**: CSS puro (nenhuma framework — Tailwind/MUI/Bootstrap)
+- **Variáveis CSS** em `:root` (--bg, --panel, --accent, --text, etc.)
+- **Responsividade**: `@media (max-width: 860px)` — sidebar becomes full-width, nav wraps
+- **Acessibilidade**: `:focus-visible`, `prefers-reduced-motion`, `.sr-only` markers
+- **Animações**: keyframes simples para neural net nodes e progress bars
+- **Tema**: Dark theme fixo (sem light/dark toggle)
+
+### 2.6 Componentes Principais (dentro de App.jsx)
+- **AuthScreen**: login/register form
+- **Dashboard**: navegação por abas, header com username/logout
+- **Aba Confronto**: seleção de liga → times → previsão fixture → PredictionView
+- **Aba Histórico**: lista de picks + stats (acertos/erros)
+- **Aba Aprendizado**: NeuralNet SVG + tabela league_models + backtest + motor_curve
+- **Aba Dados**: tabela resumo ligas + params calibrados
+- **Aba Sofascore**: dados ricos por jogo (xG, posse, chutes, cantos, cartões, etc.)
+- **PredictionView**: cartão 1X2, gols, BTTS, placar exato, heatmap, baú de dados
+- **NeuralNet**: SVG visualização "artificial intelligence" com nodes/edges animados
+
+### 2.7 Sync em Tempo Real
+- **Sofascore timer** (useEffect): a cada 2.5s consulta `/sofascore/status`, quando `running:false`para e recarrega dados
+- **Calibration timer**: a cada 3s consulta `/learning/calibrate/status`
+- **ClearInterval** em cleanup functions para evitar memory leaks
+
+---
+
+## 3. MOTOR DE PREVISÃO DETALHADO (Poisson)
+
+### 3.1 Modelo Matemático
+- **Distribuição de Poisson**: para modelar contagem de gols
+- **Lambdas (λ)**: médias de gols esperados
+  - `λ_home` = média gols casa × home_advantage
+  - `λ_away` = média gols visitante
+- **Probabilidades 1X2**: calculadas a partir da distribuição bivariada de Poisson
+
+### 3.2 Input (`model.py` - não lido integralmente, mas inferido)
+```python
+MatchInput(home=TeamInput(λ, ...), away=TeamInput(λ, ...))
+run_predict(mi, home_advantage=ha) → retorna probs["1x2"] + top_scores + proposals
+```
+
+### 3.3 Grade de Otimização (learning.py:21-23)
+```
+HOME_ADVANTAGE_GRID = [1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30]  # 7 valores
+WINDOW_GRID = [5, 8, 10, 12, 15]                                    # 5 valores
+FEATURE_GRID = ["xg", "goals", "blend"]                              # 3 valores
+```
+Combinações totais por liga: 7 × 5 × 3 = 105
+
+### 3.4 Curva de Aprendizado (motor_curve)
+- Agrupa ligas calibradas
+- Para cada liga, reamostra sua series de backtest para `buckets` pontos (padrão 20)
+- Pondera por `sample_count` (número de jogos)
+- Retorna acurácia média acumulada por % de temporada (0% → 100%)
+
+---
+
+## 4. DEPLOYMENT & INFRAESTRUTURA
+
+### 4.1 Produção (Render/Docker)
+- **Dockerfile** presente em `/home/razuk/Documents/AP2WEB/Dockerfile`
+- **render.yaml** configurado
+- **Plano free**: disco efêmero → SQLite recriado a cada deploy
+- **Endpoint health**: `GET /api/health` → `{"ok":true, "app":"AP2WEB", "db": "caminho"}`
+- **Usuários produção**: `admin/admin12345` (senha padrao, deve ser trocada — MEMORY.md item)
+
+### 4.2 Desenvolvimento Local
+- **start.sh**: verifica se backend/frontend já rodam, inicia backend (uvicorn via setsid) + frontend (vite dev)
+- **stop.sh**: para os processos
+- **Variáveis de ambiente** (.env.example): `AP2WEB_SECRET`, `AP2WEB_ORIGINS`, `AP2WEB_DB_PATH`, `AP2WEB_LEAGUES_FILE`
+- **Comandos**: `cd AP2WEB && ./start.sh` ou `nohup setsid ./start.sh > /tmp/ap2web.log 2>&1 &`
+
+### 4.3 Banco de Dados em Produção
+- SQLite arquivo único (`ap2web.db`)
+- **Problem**: disco efêmero do Render → banco se perde entre deploys
+- **Workaround**: sincronização manual ou backup externo não implementado
+
+---
+
+## 5. PROBLEMAS TÉCNICOS IDENTIFICADOS
+
+1. **Token GitHub exposto** — MEMORY.md:41 "Revogar token GitHub exposto (`ghp_...`) — vazou em conversa anterior"
+2. **Senha admin padrão** — MEMORY.md:42 "Trocar senha do admin de produção (hoje `admin/admin12345`)"
+3. **Backend caiu** — momento atual: services reiniciados via start.sh
+4. **13 ligas pendentes sync** — MEMORY.md:34 "Retomar sync das 13 ligas pendentes após cooldown (~20 min)"
+5. **soccerdata só no .venv** — MEMORY.md:92 "soccerdata só existe no `.venv` (`backend/.venv/bin/python`); `python3` do sistema não importa"
+6. **l.code bug histórico** — MEMORY.md:13 "learning.py corrigido: removido `l.code` (coluna inexistente)"
+7. **Rate limit Sofascore** — bloqueia após ~5-13 ligas, cooldown 20min necessário
+
+---
+
+## 6. RESUMO EXECUTIVO PARA ESPECIALISTA
+
+| Aspecto | Status | Observação Crítica |
+|---------|--------|-------------------|
+| **Stack Backend** | ✅ FastAPI + Python + SQLite | Arquiteto moderno, sem ORM — queries manuais dão controle total mas aumentam risco de bugs SQL |
+| **Motor Poisson** | ✅ Grid search 105 combos/liga | MIN_SAMPLES=30 filtra ligas com poucos dados; calibração em background thread |
+| **Frontend** | ✅ React 18 + Vite + CSS puro | Single-file App.jsx mantém tudo junto — produtivo para equipe pequena, difícil escalar |
+| **Autenticação** | ✅ JWT HS256 | PBKDF2 100k iterações; 401 → limpa storage + reload |
+| **Sincronização** | ⚠️ Rate limit presente | Sofascore bloqueia após 5-13 ligas; cooldown 20min necessário |
+| **Deploy** | ✅ Render Docker | SQLite efêmero — risco de perda de dados entre deploys |
+| **Segurança** | ⚠️ Críticas | Token GitHub exposto + senha admin `admin/admin12345` — corrigir imediatamente |
+| **Arquitetura** | ✅ Single source of truth (Sofascore) | Dados de uma única fonte — simplifica mas limita resiliência |
+
+**Pontos fortes**: Código bem estruturado, docs MEMORY.md mantidas, threading seguro com try/except/finally, fallback SPA em produção, proxies Vite funcionando.
+
+**Pontos de atenção**: Segurança de credenciais, perda de banco em deploy free, rate limit Sofascore requiring cooldown manual, falta de testes automatizados observados.

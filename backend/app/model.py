@@ -3,10 +3,10 @@
 Replica a lógica das abas games/Date/Predictie da planilha AP 2.0,
 com as correções recomendadas pela auditoria:
   - λs calculados dinamicamente a partir dos dados importados (não estáticos)
-  - probabilidades 1X2 normalizadas a 100%
-  - Over/Under, BTTS, HTFT e placar exato derivados da mesma matriz Poisson
+  - probabilidades 1X2 normalizadas a 100% (sum == 1.0)
+  - Over/Under, BTTS, placar exato derivados da mesma matriz Poisson
+  - Matriz de probabilidades [i][j] = P(casa i gols, fora j gols)
 """
-
 from __future__ import annotations
 
 import math
@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 MAX_GOALS = 10
+GOAL_LINES = [1.5, 2.5, 3.5, 4.5]  # linhas padrão de over/under
 
 
 def poisson_pmf(k: float, lam: float) -> float:
@@ -22,12 +23,15 @@ def poisson_pmf(k: float, lam: float) -> float:
     return math.exp(-lam) * lam**k / math.factorial(int(k))
 
 
+PoissonPmf = float  # P(X=k) para um valor k, tipo do resultado de poisson_pmf
+
+
 @dataclass
 class TeamInput:
     name: str
-    # médias de gols (da importação / histórico)
-    gf_avg: float = 0.0  # média de gols marcados
-    ga_avg: float = 0.0  # média de gols sofridos
+    # médias de gols/xG (da importação / histórico)
+    gf_avg: float = 0.0  # média de gols marcados (ou xG marcado)
+    ga_avg: float = 0.0  # média de gols sofridos (ou xG sofridos)
     # registros recentes opcionais (para form e propostas)
     matches: list[dict] = field(default_factory=list)
 
@@ -39,12 +43,19 @@ class MatchInput:
     away: TeamInput = field(default_factory=TeamInput)
 
 
+# Tipagem simplificada para dicionários de probabilidades (usado em retorno de funções)
+Probs1x2Types = dict[str, float]  # {"1": float, "X": float, "2": float}
+ProbsBttsTypes = dict[str, float]  # {"sim": float, "nao": float}
+ProbsOverTypes = dict[float, float]  # {1.5: float, 2.5: float, ...}
+ProbsScoresTypes = dict[str, float]  # {"1-0": float, ...}
+
+
 @dataclass
 class PoissonResult:
-    lambdas: dict
+    lambdas: dict[str, float]
     matrix: list[list[float]]  # prob. placar [i][j] = casa i x fora j
-    probs: dict  # 1X2, BTTS, Over/Under, placares
-    top_scores: list[dict]
+    probs: PoissonProbs  # 1X2, BTTS, Over/Under, placares
+    top_scores: list[dict[str, int | float]]
     proposals: list[dict]
 
 

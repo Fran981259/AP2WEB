@@ -1,14 +1,21 @@
 """AP2WEB — API FastAPI.
 
+Fonte única de dados: Sofascore.
 Endpoints:
   POST /api/register            cadastro de usuário
   POST /api/login               login → JWT
-  POST /api/scrape/today        raspa matches.asp (autenticado)
-  POST /api/scrape/league/{code} raspa resultados de uma liga (autenticado)
+  POST /api/sofascore/sync      sincroniza todas as ligas (background)
+  GET  /api/sofascore/status    estado da sincronização
+  GET  /api/sofascore/data      jogos + stats do banco
   GET  /api/leagues             ligas no banco (autenticado)
   GET  /api/leagues/{id}/matches  partidas da liga (autenticado)
+  GET  /api/leagues/{id}/teams  times da liga (autenticado)
   GET  /api/matches/{id}/prediction  previsão Poisson (autenticado)
-  GET  /api/runs                histórico de raspagens (autenticado)
+  GET  /api/leagues/{id}/predictions  próximas previsões (autenticado)
+  POST /api/predict/fixture     previsão de confronto arbitrário
+  GET  /api/learning/status     estado dos modelos calibrados
+  POST /api/learning/calibrate  recalibra todas as ligas (background)
+  GET  /api/learning/backtest/{league_id}  reavalia uma liga
 """
 from __future__ import annotations
 
@@ -21,16 +28,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, scraper
+from . import db, sofascore_data
 from .auth import authenticate, create_user, current_user
 from .history import delete_prediction, list_predictions, save_prediction, stats
 from .learning import (backtest_league, calibrate_league, calibration_status,
-                       model_status, start_calibration)
+                       model_status, motor_curve, start_calibration)
 from .prediction import predict_league_upcoming, predict_match, predict_fixture
 
-app = FastAPI(title="AP2WEB", version="0.1.0")
+app = FastAPI(title="AP2WEB", version="0.2.0")
 
-# Origem(s) permitida(s) — separar por vírgula. Default: local dev.
 _origins = [o.strip() for o in os.environ.get(
     "AP2WEB_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173,https://app.theprostatereview.com").split(",") if o.strip()]
@@ -57,10 +63,6 @@ class RegisterBody(BaseModel):
 class LoginBody(BaseModel):
     username: str
     password: str
-
-
-class ScrapeLeagueBody(BaseModel):
-    league: str
 
 
 class FixtureBody(BaseModel):
@@ -101,70 +103,36 @@ def me(user: str = Depends(current_user)):
     return {"username": user}
 
 
-# --------------------------- scraping ---------------------------
+# --------------------------- dados (Sofascore) ---------------------------
 
-@app.post("/api/scrape/today", tags=["scrape"])
-def scrape_today(user: str = Depends(current_user)):
+@app.post("/api/sofascore/sync", tags=["sofascore"])
+def sofascore_sync(user: str = Depends(current_user)):
+    """Sincroniza todas as ligas configuradas (temporada + rodadas + stats) em background."""
+    return sofascore_data.start_sync()
+
+
+@app.post("/api/sofascore/sync/league/{league_id}", tags=["sofascore"])
+def sofascore_sync_league(league_id: int, user: str = Depends(current_user)):
+    """Sincroniza apenas uma liga (demanda pontual de dados)."""
     try:
-        return scraper.scrape_today()
-    except scraper.ScraperError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        return sofascore_data.sync_league_local(league_id)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Liga não encontrada")
 
 
-@app.post("/api/scrape/league", tags=["scrape"])
-def scrape_league(body: ScrapeLeagueBody, user: str = Depends(current_user)):
-    try:
-        return scraper.scrape_league_results(body.league.strip().lower())
-    except scraper.ScraperError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+@app.get("/api/sofascore/status", tags=["sofascore"])
+def sofascore_status(user: str = Depends(current_user)):
+    return sofascore_data.status()
 
 
-@app.post("/api/scrape/batch", tags=["scrape"])
-def scrape_batch(user: str = Depends(current_user)):
-    """Inicia a raspagem de todas as ligas da lista em background."""
-    return scraper.start_batch_scrape()
+@app.get("/api/sofascore/data", tags=["sofascore"])
+def sofascore_data_endpoint(league_id: int | None = None, user: str = Depends(current_user)):
+    return sofascore_data.dataset(league_id)
 
-
-@app.get("/api/scrape/batch/status", tags=["scrape"])
-def scrape_batch_status(user: str = Depends(current_user)):
-    return scraper.batch_status()
-
-
-@app.get("/api/runs", tags=["scrape"])
-def runs(user: str = Depends(current_user)):
-    return [dict(r) for r in db.run_query(
-        "SELECT * FROM scrape_runs ORDER BY id DESC LIMIT 20")]
-
-
-# --------------------------- dados + previsão ---------------------------
 
 @app.get("/api/leagues", tags=["data"])
 def leagues(user: str = Depends(current_user)):
-    return [dict(r) for r in db.run_query(
-        "SELECT l.*, (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id) AS matches, "
-        "(SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='scheduled') AS scheduled "
-        "FROM leagues l ORDER BY l.name")]
-
-
-@app.get("/api/data/overview", tags=["data"])
-def data_overview(user: str = Depends(current_user)):
-    """Visão geral dos dados por liga: volume, qualidade, calibração e última partida."""
-    rows = db.run_query(
-        "SELECT l.id, l.code, l.name, l.country, "
-        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played') AS played, "
-        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='scheduled') AS scheduled, "
-        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played' "
-        "   AND (m.ft_home IS NULL OR m.ft_home > 12 OR m.ft_away > 12 OR m.ft_home < 0 OR m.ft_away < 0)) AS corrupt, "
-        " (SELECT COUNT(*) FROM matches m WHERE m.league_id=l.id AND m.status='played' "
-        "   AND m.ft_home IS NOT NULL AND m.ft_home <= 12 AND m.ft_away <= 12) AS clean, "
-        " (SELECT MAX(m.match_date) FROM matches m WHERE m.league_id=l.id AND m.status='played') AS last_played, "
-        " (SELECT COUNT(*) FROM team_stats ts JOIN matches m ON m.id=ts.match_id "
-        "   WHERE m.league_id=l.id) AS stats_rows, "
-        " (SELECT COUNT(*) FROM league_models lm WHERE lm.league_id=l.id) AS has_model, "
-        " lm.home_advantage, lm.window, lm.accuracy, lm.brier, lm.calibrated_at "
-        "FROM leagues l LEFT JOIN league_models lm ON lm.league_id=l.id "
-        "ORDER BY l.name")
-    return [dict(r) for r in rows]
+    return sofascore_data.leagues()
 
 
 @app.get("/api/leagues/{league_id}/teams", tags=["data"])
@@ -177,36 +145,40 @@ def league_teams(league_id: int, user: str = Depends(current_user)):
         (league_id, league_id))]
 
 
-@app.post("/api/predict/fixture", tags=["prediction"])
-def fixture_prediction(body: FixtureBody, user: str = Depends(current_user)):
-    try:
-        return predict_fixture(body.league_id, body.home_team_id, body.away_team_id)
-    except IndexError:
-        raise HTTPException(status_code=404, detail="Confronto não encontrado")
-
-
 @app.get("/api/leagues/{league_id}/matches", tags=["data"])
 def league_matches(league_id: int, user: str = Depends(current_user)):
     return [dict(r) for r in db.run_query(
-        "SELECT m.id, m.match_date, m.kickoff, m.status, m.ht_home, m.ht_away, "
-        "m.ft_home, m.ft_away, th.name AS home, ta.name AS away "
+        "SELECT m.id, m.kickoff_datetime, m.round, m.status, m.score_home, m.score_away, "
+        "m.xg_home, m.xg_away, th.name AS home, ta.name AS away "
         "FROM matches m JOIN teams th ON th.id=m.home_team_id "
         "JOIN teams ta ON ta.id=m.away_team_id "
-        "WHERE m.league_id=? ORDER BY m.match_date DESC, m.kickoff LIMIT 200",
+        "WHERE m.league_id=? ORDER BY m.kickoff_datetime DESC, m.id LIMIT 200",
         (league_id,))]
 
 
 @app.get("/api/matches/{match_id}/prediction", tags=["prediction"])
-def prediction(match_id: int, user: str = Depends(current_user)):
+def prediction(match_id: int, user: str = Depends(current_user),
+               as_of_timestamp: str | None = None):
     try:
-        return predict_match(match_id)
+        return predict_match(match_id, as_of_timestamp=as_of_timestamp)
     except IndexError:
         raise HTTPException(status_code=404, detail="Partida não encontrada")
 
 
+@app.post("/api/predict/fixture", tags=["prediction"])
+def fixture_prediction(body: FixtureBody, user: str = Depends(current_user),
+                       as_of_timestamp: str | None = None):
+    try:
+        return predict_fixture(body.league_id, body.home_team_id, body.away_team_id,
+                               as_of_timestamp=as_of_timestamp)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Confronto não encontrado")
+
+
 @app.get("/api/leagues/{league_id}/predictions", tags=["prediction"])
-def league_predictions(league_id: int, user: str = Depends(current_user)):
-    return predict_league_upcoming(league_id)
+def league_predictions(league_id: int, user: str = Depends(current_user),
+                       as_of_timestamp: str | None = None):
+    return predict_league_upcoming(league_id, as_of_timestamp=as_of_timestamp)
 
 
 # --------------------------- histórico de previsões ---------------------------
@@ -239,7 +211,6 @@ def remove_prediction(prediction_id: int, user: str = Depends(current_user)):
 
 @app.post("/api/learning/calibrate", tags=["learning"])
 def learning_calibrate(user: str = Depends(current_user)):
-    """Inicia a calibração de todas as ligas em background."""
     return start_calibration()
 
 
@@ -256,22 +227,51 @@ def learning_calibrate_status(user: str = Depends(current_user)):
     return calibration_status()
 
 
-@app.post("/api/learning/calibrate/{league_id}", tags=["learning"])
-def learning_calibrate_league(league_id: int, user: str = Depends(current_user)):
-    r = calibrate_league(league_id)
-    if not r:
-        raise HTTPException(status_code=400, detail="Liga sem dados suficientes")
-    return r
-
-
 @app.get("/api/learning/status", tags=["learning"])
 def learning_status(user: str = Depends(current_user)):
     return model_status()
 
 
+@app.get("/api/learning/curve", tags=["learning"])
+def learning_curve(user: str = Depends(current_user)):
+    """Linha de aprendizado real do motor (acurácia acumulada média por % de temporada)."""
+    return motor_curve()
+
+
 @app.get("/api/learning/backtest/{league_id}", tags=["learning"])
 def learning_backtest(league_id: int, user: str = Depends(current_user)):
     return backtest_league(league_id)
+
+
+@app.get("/api/learning/xgb/{league_id}", tags=["learning"])
+def learning_xgb_comparison(league_id: int, user: str = Depends(current_user)):
+    """BASE.md §26-27: comparação honesta XGBoost vs Poisson (walk-forward temporal).
+
+    Lenta (~1 min): retreina o XGB incrementalmente ao longo da temporada.
+    Veredito segue critérios Brier/LogLoss; promoção é decisão humana.
+    """
+    from .xgb_engine import compare_models
+    return compare_models(league_id)
+
+
+@app.get("/api/market/{match_id}", tags=["market"])
+def market_match(match_id: int, as_of: str | None = None,
+                 user: str = Depends(current_user)):
+    """FASE 10 — Market Engine: fair odds, market odds, EV para um jogo.
+
+    - `as_of` (opcional): filtro de data para evitar lookahead (FASE 4).
+    """
+    from .market import market_for_match
+    return market_for_match(match_id, as_of)
+
+
+@app.get("/api/market/league/{league_id}", tags=["market"])
+def market_league(league_id: int, limit: int = 20,
+                  as_of: str | None = None,
+                  user: str = Depends(current_user)):
+    """FASE 10 — Market Engine: odds+EV para os próximos jogos de uma liga."""
+    from .market import market_league
+    return market_league(league_id, limit, as_of)
 
 
 @app.get("/api/health", tags=["misc"])

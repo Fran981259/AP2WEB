@@ -1,4 +1,4 @@
-"""Banco de dados SQLite — schema do AP2WEB."""
+"""Banco de dados SQLite — schema do AP2WEB (fonte única: Sofascore)."""
 from __future__ import annotations
 
 import os
@@ -21,68 +21,72 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS leagues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT UNIQUE NOT NULL,          -- slug usado pelo soccerstats (ex: england)
+    sofascore_id INTEGER UNIQUE NOT NULL,   -- unique-tournament id do Sofascore
     name TEXT NOT NULL,
     country TEXT,
-    season TEXT,
+    season_id INTEGER,                      -- temporada ativa no Sofascore
+    season_name TEXT,
+    last_sync TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS teams (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     league_id INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+    sofascore_id INTEGER,                   -- id do time no Sofascore
     name TEXT NOT NULL,
-    stats_key TEXT,                     -- id de time no soccerstats (ex: stats=1-aldosivi)
-    UNIQUE(league_id, name)
+    UNIQUE(league_id, sofascore_id)
 );
 
 CREATE TABLE IF NOT EXISTS matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     league_id INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+    sofascore_id INTEGER UNIQUE,            -- event id do Sofascore
     home_team_id INTEGER REFERENCES teams(id),
     away_team_id INTEGER REFERENCES teams(id),
-    match_date TEXT,
-    kickoff TEXT,
-    status TEXT,                        -- scheduled | played
-    ht_home INTEGER, ht_away INTEGER,
-    ft_home INTEGER, ft_away INTEGER,
-    corners_home INTEGER, corners_away INTEGER,
-    source_url TEXT,
+    kickoff_datetime TEXT,                  -- kickoff em UTC (ISO 8601), fonte: Sofascore startTimestamp
+    match_date TEXT,                        -- derived date (YYYY-MM-DD) for backward compat
+    round INTEGER,
+    status TEXT,                            -- played | scheduled
+    score_home INTEGER,
+    score_away INTEGER,
+    -- estatísticas do Sofascore (casa / fora)
+    xg_home REAL, xg_away REAL,
+    xg_on_target_home REAL, xg_on_target_away REAL,
+    possession_home REAL, possession_away REAL,
+    shots_total_home REAL, shots_total_away REAL,
+    shots_on_target_home REAL, shots_on_target_away REAL,
+    shots_off_target_home REAL, shots_off_target_away REAL,
+    shots_inside_box_home REAL, shots_inside_box_away REAL,
+    shots_outside_box_home REAL, shots_outside_box_away REAL,
+    blocked_shots_home REAL, blocked_shots_away REAL,
+    big_chances_home REAL, big_chances_away REAL,
+    big_chances_missed_home REAL, big_chances_missed_away REAL,
+    corners_home REAL, corners_away REAL,
+    fouls_home REAL, fouls_away REAL,
+    yellow_cards_home REAL, yellow_cards_away REAL,
+    red_cards_home REAL, red_cards_away REAL,
+    passes_home REAL, passes_away REAL,
+    accurate_passes_home REAL, accurate_passes_away REAL,
+    offsides_home REAL, offsides_away REAL,
+    saves_home REAL, saves_away REAL,
+    interceptions_home REAL, interceptions_away REAL,
+    recoveries_home REAL, recoveries_away REAL,
+    tackles_home REAL, tackles_away REAL,
+    dribbles_home REAL, dribbles_away REAL,
+    duels_home REAL, duels_away REAL,
+    aerial_duels_home REAL, aerial_duels_away REAL,
+    final_third_home REAL, final_third_away REAL,
+    throw_ins_home REAL, throw_ins_away REAL,
+    goal_kicks_home REAL, goal_kicks_away REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(league_id, home_team_id, away_team_id, match_date)
+    UNIQUE(league_id, sofascore_id)
 );
 
-CREATE TABLE IF NOT EXISTS team_stats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
-    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    scope TEXT,                         -- home | away
-    gp INTEGER, win_pct REAL, fts_pct REAL, cs_pct REAL, bts_pct REAL,
-    tg REAL, gf REAL, ga REAL,
-    ov15 REAL, ov25 REAL, ov35 REAL, ppg REAL,
-    UNIQUE(match_id, team_id)
-);
-
-CREATE TABLE IF NOT EXISTS scrape_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at TEXT,
-    source TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'running',  -- running | ok | error
-    leagues_updated INTEGER NOT NULL DEFAULT 0,
-    matches_found INTEGER NOT NULL DEFAULT 0,
-    matches_saved INTEGER NOT NULL DEFAULT 0,
-    error TEXT
-);
-
-CREATE TABLE IF NOT EXISTS scrape_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL REFERENCES scrape_runs(id) ON DELETE CASCADE,
-    league TEXT,
-    message TEXT,
-    level TEXT NOT NULL DEFAULT 'info',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+CREATE INDEX IF NOT EXISTS idx_matches_league ON matches(league_id);
+CREATE INDEX IF NOT EXISTS idx_matches_kickoff ON matches(kickoff_datetime);
+CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(match_date);
+CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
 
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +100,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     match_date TEXT,
     pick_type TEXT,                  -- 1X2 | GOLS | BTTS | PLACAR
     pick_value TEXT,                 -- "1"|"X"|"2", "over_2.5", "sim", "2-1"
-    pick_label TEXT,                 -- ex "Back Real Madrid", "Over 2.5"
+    pick_label TEXT,
     prob REAL,
     odd REAL,
     payload TEXT,                    -- JSON com a previsão completa
@@ -112,6 +116,7 @@ CREATE TABLE IF NOT EXISTS league_models (
     league_id INTEGER PRIMARY KEY REFERENCES leagues(id) ON DELETE CASCADE,
     home_advantage REAL NOT NULL DEFAULT 1.15,   -- fator de mando calibrado por liga
     window INTEGER NOT NULL DEFAULT 10,          -- janela deslizante ótima (últimos N jogos)
+    feature TEXT NOT NULL DEFAULT 'xg',          -- xg | goals | blend
     accuracy REAL,                               -- acurácia 1X2 no backtest (0-100)
     brier REAL,                                  -- Brier score (menor = melhor)
     sample_count INTEGER,                        -- nº de jogos usados no backtest
@@ -121,15 +126,32 @@ CREATE TABLE IF NOT EXISTS league_models (
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=60000")
     return conn
 
 
 def init_db() -> None:
     conn = get_conn()
     try:
+        conn.executescript(SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reset_db() -> None:
+    """Remove todas as tabelas e recria (banco novo do zero)."""
+    conn = get_conn()
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        tables = [r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        for t in tables:
+            conn.execute(f'DROP TABLE IF EXISTS "{t}"')
+        conn.commit()
         conn.executescript(SCHEMA)
         conn.commit()
     finally:
