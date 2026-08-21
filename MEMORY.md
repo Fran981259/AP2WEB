@@ -218,16 +218,43 @@
 - Pode ser continuado em sessão futura com `sofascore_data.sync_league_local(id)`
 
 ### 🎯 Próximas Fases BASE.md (atualizado pós PROP-005)
-- ~~**FASE 9**: Ensemble~~ → **BLOQUEADA**: exige XGBoost real (nunca implementado) validado contra baseline com metodologia do `backtest_league` + bases ingênas (ML v1.1 §20.1)
-- **FASE 10: Market Engine — DESBLOQUEADA** ✅ (depende só do Poisson, que está íntegro)
-- **FASE 11**: Risk Engine — Kelly fracionado (após 10)
+- ~~**FASE 9**: Ensemble~~ → **BLOQUEADA**: XGBoost real implementado (xgb_engine.py) mas **perde do Poisson em Brier/LogLoss em 5/5 ligas** (1.381 confrontos walk-forward). Ensemble contra-indicado; só retomar com evidência nova (ex: FEATURE-001)
+- ~~**FASE 10**: Market Engine~~ → **CONCLUÍDA ✅** (21/08/2026): `market.py` + endpoints `/api/market/{match_id}` e `/api/market/league/{league_id}` — fair odds, market odds (vig 4%), EV, kelly_full, value_bets
+- **FASE 11: Risk Engine** → PRÓXIMA (Kelly fracionado, limites, exposição; kelly_full já exposto no market.py como base)
+- **FASE 12**: Agent Runtime (após todas as científicas)
+
+### 🗄️ Banco de Dados Dual-Engine (21/08/2026)
+- `db.py` traduz SQLite→Postgres em runtime quando `DATABASE_URL` está setada (senão SQLite local, comportamento idêntico ao original)
+- Traduções: `?`→`%s` · `date(x)`→`(x)::date` · `date(?)`→`(left(?,10))::date` (PG estrito) · `datetime('now')`→`to_char(now())` · `window`→`"window"` (reservada PG) · INSERT ganha `RETURNING id` com fallback p/ PK não-id
+- **Fonte única de SQL** (ML v1.1 §20.1): nenhum query paralelo por engine
+- Migração: `DATABASE_URL=... backend/.venv/bin/python backend/scripts/migrate_sqlite_to_pg.py`
+- Validado em PostgreSQL 16.4 real + regressão 20/20 · Render free = SQLite efêmero; Neon grátis persiste
+
+### 📊 Monitor de Evolução (21/08/2026)
+- `evolution_tracker.py`: baseline (`--baseline`) + comparação CLI + histórico append-only em `backend/app/data/evolution_history.jsonl`
+- Aba **📈 Evolução** no frontend: cards de status, tabela de mudanças vs baseline (delta colorido), métricas por liga, gráfico de tendência (LineChart)
+- Endpoints: `/api/evolution/snapshot` (grava no histórico a cada chamada) e `/api/evolution/history`
+- 5 ligas monitoradas: 20, 18, 65, 23, 24 (top por jogos)
+
+### 🎯 XGBoost Real (FASE 8 refeita, 21/08/2026)
+- `xgb_engine.py`: dataset leak-safe (12 features por time, janela 10), comparação honesta vs Poisson vs prior empírico no MESMO conjunto
+- Endpoint `/api/learning/xgb/{league_id}` (~1 min)
+- Resultado: Poisson vence em Brier+LogLoss nas ligas 20/18/65/23/24 → **Poisson permanece modelo de produção**
+
+### 🎯 FEATURE-001 (backlog, registrado 21/08/2026)
+- Fator de colocação/tabela no modelo — ver `skill/evolution-engine/memory/promotions/FEATURE-001.md`
+- Implementar AO FINAL dos módulos (decisão do usuário); critério: ganho em Brier/LogLoss via compare_models
 
 ### 📋 Tasks Specifically Marked
 - [ ] Continuar sync das ligas pendentes em lotes futuros (rate limit SofaScore)
-- [ ] Decidir FASE 9: prosseguir com Ensemble ou pular para FASE 10 (Market Engine)
-- [ ] **Frontend: Corrigir duplicated leagues — aplicar dedup no estado `leagues` e remover duplicate refresh calls** ✅ (feito em App.jsx)
+- [x] Decidir FASE 9: XGBoost real implementado — Poisson venceu → Ensemble bloqueado por evidência
+- [x] FASE 10 Market Engine ✅ (market.py + endpoints + validação)
+- [x] **Frontend: Corrigir duplicated leagues — aplicar dedup no estado `leagues` e remover duplicate refresh calls** ✅ (feito em App.jsx)
 - [ ] Expor avaliação contínua usando histórico `predictions` em tempo real
 - [ ] Manter MEMORY.md atualizado ao final de cada sessão
+- [ ] FASE 11 Risk Engine (próxima)
+- [ ] FEATURE-001 fator de colocação (ao final dos módulos, decisão do usuário)
+- [ ] Configurar DATABASE_URL no Render + migrar dados p/ Neon (script pronto)
 
 ---
 
