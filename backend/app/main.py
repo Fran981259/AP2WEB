@@ -274,6 +274,43 @@ def market_league(league_id: int, limit: int = 20,
     return market_league(league_id, limit, as_of)
 
 
+@app.get("/api/evolution/snapshot", tags=["evolution"])
+def evolution_snapshot(user: str = Depends(current_user)):
+    """Snapshot atual do rastreador de evolução (baseline + delta vs anterior).
+
+    Leve: sem suíte selenium (regression_suite=None na UI; use o CLI para medi-la).
+    Cada chamada grava a medição no histórico persistente (append-only).
+    """
+    from .evolution_tracker import (_snapshot, _load_baseline, _compare,
+                                    _append_history, _history_count)
+    current = _snapshot(skip_regression=True)
+    baseline = _load_baseline()
+    changes = _compare(current, baseline) if baseline else []
+    current["api_health"] = True   # este endpoint respondendo = API online
+    current["regression_suite"] = None  # selenium só existe em dev
+    _append_history(current)  # persiste toda medição da UI
+    return {
+        "current": current,
+        "baseline": baseline,
+        "changes": changes,
+        "stable": len(changes) == 0,
+        "history_size": _history_count(),
+        "env": "dev" if os.environ.get("AP2WEB_DEV") else "deploy",
+    }
+
+
+@app.get("/api/evolution/history", tags=["evolution"])
+def evolution_history(limit: int = 50, user: str = Depends(current_user)):
+    """Série temporal das medições persistentes (para gráfico de tendência)."""
+    from .evolution_tracker import _load_history, _trend_series
+    history = _load_history(limit)
+    return {
+        "count": len(history),
+        "history": history,
+        "series": _trend_series(history),
+    }
+
+
 @app.get("/api/health", tags=["misc"])
 def health():
     return {"ok": True, "app": "AP2WEB", "db": str(db.DB_PATH)}

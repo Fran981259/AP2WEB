@@ -165,6 +165,10 @@ function Dashboard({ username, token, onLogout }) {
   const [sofaTeamFilter, setSofaTeamFilter] = useState('')
   const [sofaRoundFilter, setSofaRoundFilter] = useState('')
 
+  const [evol, setEvol] = useState(null)
+  const [evolLoading, setEvolLoading] = useState(false)
+  const [evolHist, setEvolHist] = useState(null)
+
   async function refreshLeagues() {
     const raw = await api.leagues(token)
     // Deduplicate by league id — sem spread de iterador (bug de transpilação esbuild)
@@ -252,6 +256,20 @@ function Dashboard({ username, token, onLogout }) {
       setCurve(await api.learningCurve(token))
     } catch (e) { setError(e.message) }
     setCurveLoading(false)
+  }
+
+  async function loadEvolution() {
+    setEvolLoading(true); setError('')
+    try {
+      setEvol(await api.evolutionSnapshot(token))
+    } catch (e) { setError(e.message) }
+    setEvolLoading(false)
+  }
+
+  async function loadEvolutionHistory() {
+    try {
+      setEvolHist(await api.evolutionHistory(50, token))
+    } catch (e) { /* histórico é opcional — não bloqueia a aba */ }
   }
 
   async function onCfLeagueChange(leagueId) {
@@ -367,6 +385,7 @@ function Dashboard({ username, token, onLogout }) {
           <button className={tab === 'aprendizado' ? 'active' : ''} onClick={() => setTab('aprendizado')}>Aprendizado</button>
           <button className={tab === 'dados' ? 'active' : ''} onClick={() => setTab('dados')}>Dados</button>
           <button className={tab === 'sofascore' ? 'active' : ''} onClick={() => setTab('sofascore')}>Sofascore</button>
+          <button className={tab === 'evolucao' ? 'active' : ''} onClick={() => { setTab('evolucao'); loadEvolution(); loadEvolutionHistory() }}>📈 Evolução</button>
         </nav>
         <div className="user">
           <span>{username}</span>
@@ -856,6 +875,130 @@ function Dashboard({ username, token, onLogout }) {
           </section>
         </main>
       )}
+
+      {tab === 'evolucao' && (
+        <main className="column">
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h3>📈 Monitor de Evolução</h3>
+                <p className="muted small">
+                  Compara as métricas atuais do motor (walk-forward honesto) contra o baseline armazenado.
+                  Delta ≠ 0 = mudança real detectada — nada de impressão subjetiva.
+                </p>
+              </div>
+              <button className="btn-small" onClick={() => { loadEvolution(); loadEvolutionHistory() }} disabled={evolLoading}>
+                {evolLoading ? 'Medindo...' : '🔄 Atualizar agora'}
+              </button>
+            </div>
+
+            {!evol && !evolLoading && (
+              <p className="muted small" style={{ padding: '14px 0' }}>
+                Clique em "Atualizar agora" para medir o estado atual e comparar com o baseline.
+              </p>
+            )}
+
+            {evol && (
+              <>
+                <div className="hist-stats">
+                  <Stat label="API" value={evol.current?.api_health ? 'online' : 'offline'} ok={evol.current?.api_health} bad={!evol.current?.api_health} />
+                  <Stat label="Regressão" value={evol.current?.regression_suite || 'n/d*'}
+                        title="Suíte selenium disponível apenas em dev (CLI)" />
+                  <Stat label="Mudanças vs baseline" value={(evol.changes || []).length} ok={(evol.changes || []).length === 0} />
+                  <Stat label="Snapshot" value={(evol.current?.timestamp || '').slice(0, 16).replace('T', ' ')} />
+                </div>
+
+                {(evol.changes || []).length > 0 && (
+                  <div className="table-scroll" style={{ marginTop: 14 }}>
+                    <h4 style={{ margin: '6px 0 10px' }}>⚡ Mudanças detectadas</h4>
+                    <table className="runs">
+                      <thead>
+                        <tr><th>Métrica</th><th>Antes</th><th>Depois</th><th>Delta</th></tr>
+                      </thead>
+                      <tbody>
+                        {evol.changes.map((c, i) => {
+                          const good = typeof c.delta === 'number'
+                            ? (c.metric.includes('accuracy') ? c.delta > 0 : c.delta < 0)
+                            : null
+                          return (
+                            <tr key={i}>
+                              <td><b>{c.metric}</b></td>
+                              <td>{c.before}</td>
+                              <td>{c.after}</td>
+                              <td style={{ color: good == null ? '#94a3b8' : good ? '#34d399' : '#f87171', fontWeight: 700 }}>
+                                {typeof c.delta === 'number' ? `${c.delta > 0 ? '+' : ''}${c.delta}` : c.delta}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {(evol.changes || []).length === 0 && evol.baseline && (
+                  <p className="muted small" style={{ marginTop: 12 }}>
+                    ✅ Nenhuma mudança desde o último snapshot — sistema estável.
+                  </p>
+                )}
+
+                {evol.current?.leagues && Object.keys(evol.current.leagues).length > 0 && (
+                  <div className="table-scroll" style={{ marginTop: 14 }}>
+                    <h4 style={{ margin: '6px 0 10px' }}>🎯 Métricas atuais por liga (walk-forward)</h4>
+                    <table className="runs">
+                      <thead>
+                        <tr><th>Liga</th><th>Acurácia</th><th>Brier</th><th>LogLoss</th></tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(evol.current.leagues).map(([lid, m]) => (
+                          m.error
+                            ? <tr key={lid}><td>{lid}</td><td colSpan={3} className="muted">{m.error}</td></tr>
+                            : (
+                              <tr key={lid}>
+                                <td><b>{lid}</b></td>
+                                <td>{m.poisson_accuracy}%</td>
+                                <td>{m.poisson_brier}</td>
+                                <td>{m.poisson_logloss ?? '—'}</td>
+                              </tr>
+                            )
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
+
+            {evolHist && evolHist.count > 1 && (() => {
+              const lids = Object.keys(evolHist.series || {})
+              return (
+                <section className="card" style={{ marginTop: 16 }}>
+                  <h4>📉 Tendência histórica ({evolHist.count} medições persistentes)</h4>
+                  {lids.map(lid => {
+                    const pts = evolHist.series[lid].filter(p => p.acc != null)
+                    if (pts.length < 2) return null
+                    return (
+                      <LineChart key={lid}
+                                 data={pts.map(p => ({ x: p.n, y: p.acc }))}
+                                 title={`Liga ${lid} · acurácia ao longo das medições`}
+                                 xLabel="medições" yLabel="acurácia %" />
+                    )
+                  })}
+                  <p className="muted small" style={{ marginTop: 8 }}>
+                    Cada medição (UI ou CLI) fica gravada em <code>backend/app/data/evolution_history.jsonl</code> — nada é sobrescrito.
+                  </p>
+                </section>
+              )
+            })()}
+
+            {evolHist && evolHist.count <= 1 && (
+              <p className="muted small" style={{ marginTop: 12 }}>
+                Histórico tem {evolHist.count} medição(ões). Meça novamente em momentos diferentes (após calibrações, syncs ou mudanças de modelo) para gerar a curva de tendência.
+              </p>
+            )}
+          </section>
+        </main>
+      )}
     </div>
   )
 }
@@ -884,7 +1027,10 @@ function LineChart({ data, title, xLabel, yLabel }) {
   const area = `${line} L${px(maxX).toFixed(1)},${py(loY).toFixed(1)} L${px(minX).toFixed(1)},${py(loY).toFixed(1)} Z`
   const last = data[data.length - 1]
 
-  const yTicks = [0, 25, 50, 75, 100].filter(t => t >= loY && t <= hiY)
+  // ticks dinâmicos: passo 25 para faixas largas, 10 para estreitas
+  const step = (hiY - loY) > 60 ? 25 : 10
+  const yTicks = []
+  for (let t = Math.ceil(loY / step) * step; t <= hiY; t += step) yTicks.push(t)
 
   return (
     <div className="chart-card">

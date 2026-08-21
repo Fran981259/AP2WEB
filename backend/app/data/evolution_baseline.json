@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-08-21T22:08:28.407895+00:00",
+  "leagues": {
+    "20": {
+      "poisson_accuracy": 49.46,
+      "poisson_brier": 0.6197,
+      "poisson_logloss": 1.0
+    },
+    "18": {
+      "poisson_accuracy": 48.65,
+      "poisson_brier": 0.6333,
+      "poisson_logloss": 1.0
+    },
+    "65": {
+      "poisson_accuracy": 45.81,
+      "poisson_brier": 0.6599,
+      "poisson_logloss": 1.0
+    },
+    "23": {
+      "poisson_accuracy": 47.47,
+      "poisson_brier": 0.6259,
+      "poisson_logloss": 1.0
+    },
+    "24": {
+      "poisson_accuracy": 51.85,
+      "poisson_brier": 0.5989,
+      "poisson_logloss": 1.0
+    }
+  },
+  "api_health": true,
+  "regression_suite": "FAIL"
+}
