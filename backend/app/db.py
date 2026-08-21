@@ -1,17 +1,65 @@
-"""Banco de dados SQLite — schema do AP2WEB (fonte única: Sofascore)."""
+"""Camada de banco dual-engine do AP2WEB.
+
+- SQLite (padrão local): comportamento idêntico ao original.
+- Postgres (Neon/Supabase etc.): ativado pela env var DATABASE_URL.
+  O SQL escrito no projeto continua em dialeto SQLite (`?`, date(),
+  datetime('now')) — a camada traduz em tempo de execução (ML Skill v1.1 §20.1:
+  fonte única; nenhuma query paralela por engine).
+"""
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+MODE = "postgres" if DATABASE_URL else "sqlite"
 
 DB_PATH = Path(os.environ.get(
     "AP2WEB_DB_PATH",
     Path(__file__).resolve().parent.parent / "ap2web.db"))
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+if MODE == "postgres":
+    import psycopg  # psycopg 3
+    from psycopg.rows import dict_row
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tradução SQLite -> Postgres
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_pg_sql(sql: str) -> str:
+    """Traduz dialeto SQLite para Postgres.
+
+    - placeholders ? -> %s
+    - date(expr)     -> (expr)::date        (evita 'match_date' via \b)
+    - date(?)        -> (left(?,10))::date  (PG é estrito com formato de data)
+    - datetime('now')-> to_char(now(),...)
+    - window         -> "window"            (palavra reservada no PG)
+    """
+    # 1) params dentro de date(): trunca para YYYY-MM-DD antes do cast
+    s = re.sub(r"\bdate\(\s*\?\s*\)", "(left(?,10))::date", s := sql)
+    # 2) placeholders ? -> %s
+    s = s.replace("?", "%s")
+    # 3) colunas: date(expr) -> (expr)::date
+    s = re.sub(r"\bdate\(([^()]+)\)", r"(\1)::date", s)
+    # 4) datetime('now')
+    s = s.replace("datetime('now')",
+                  "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')")
+    # 5) palavra reservada
+    s = re.sub(r'\bwindow\b', '"window"', s)
+    return s
+
+
+def _pg_connect():
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -104,6 +152,10 @@ CREATE TABLE IF NOT EXISTS predictions (
     prob REAL,
     odd REAL,
     payload TEXT,                    -- JSON com a previsão completa
+    model_version TEXT,
+    predicted_at TEXT,
+    brier_score REAL,
+    log_loss REAL,
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | correct | wrong
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -124,8 +176,20 @@ CREATE TABLE IF NOT EXISTS league_models (
 );
 """
 
+_PG_SCHEMA = re.sub(
+    r"\bdate\(([^()]+)\)", r"(\1)::date",
+    SCHEMA.replace("INTEGER PRIMARY KEY AUTOINCREMENT",
+                   "SERIAL PRIMARY KEY")
+          .replace("datetime('now')",
+                   "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')")
+          .replace(" window INTEGER", ' "window" INTEGER'))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API pública (mesma assinatura das duas engines)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_conn() -> sqlite3.Connection:
+    """SQLite apenas. Em modo Postgres, use run_query/run_exec."""
     conn = sqlite3.connect(DB_PATH, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -134,43 +198,92 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    conn = get_conn()
-    try:
-        conn.executescript(SCHEMA)
-        conn.commit()
-    finally:
-        conn.close()
+    if MODE == "sqlite":
+        conn = get_conn()
+        try:
+            conn.executescript(SCHEMA)
+            conn.commit()
+        finally:
+            conn.close()
+        return
+    with _pg_connect() as conn:
+        for stmt in _PG_SCHEMA.split(";"):
+            if stmt.strip():
+                conn.execute(stmt)
 
 
 def reset_db() -> None:
     """Remove todas as tabelas e recria (banco novo do zero)."""
-    conn = get_conn()
-    try:
-        conn.execute("PRAGMA foreign_keys=OFF")
-        tables = [r["name"] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
-        for t in tables:
-            conn.execute(f'DROP TABLE IF EXISTS "{t}"')
-        conn.commit()
-        conn.executescript(SCHEMA)
-        conn.commit()
-    finally:
-        conn.close()
+    if MODE == "sqlite":
+        conn = get_conn()
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            tables = [r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            for t in tables:
+                conn.execute(f'DROP TABLE IF EXISTS "{t}"')
+            conn.commit()
+            conn.executescript(SCHEMA)
+            conn.commit()
+        finally:
+            conn.close()
+        return
+    with _pg_connect() as conn:
+        rows = conn.execute(
+            "SELECT tablename AS name FROM pg_tables WHERE schemaname='public'")
+        for r in rows.fetchall():
+            conn.execute(f'DROP TABLE IF EXISTS "{r["name"]}" CASCADE')
+        for stmt in _PG_SCHEMA.split(";"):
+            if stmt.strip():
+                conn.execute(stmt)
 
 
-def run_query(query: str, params: tuple = ()) -> list[sqlite3.Row]:
-    conn = get_conn()
-    try:
-        return conn.execute(query, params).fetchall()
-    finally:
-        conn.close()
+def run_query(query: str, params: tuple = ()) -> list[dict]:
+    """SELECT — retorna linhas acessíveis por r["coluna"]."""
+    if MODE == "sqlite":
+        conn = get_conn()
+        try:
+            return conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+    with _pg_connect() as conn:
+        return conn.execute(_to_pg_sql(query), params).fetchall()
 
 
 def run_exec(query: str, params: tuple = ()) -> int:
-    conn = get_conn()
+    """INSERT/UPDATE/DELETE — retorna id (INSERT) ou rowcount (UPDATE/DELETE).
+
+    Em Postgres, INSERT ganha RETURNING id automaticamente para preservar
+    o contrato lastrowid usado pelo restante do código.
+    """
+    if MODE == "sqlite":
+        conn = get_conn()
+        try:
+            cur = conn.execute(query, params)
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+    q = _to_pg_sql(query)
+    stripped = q.lstrip().upper()
+    returns_id = stripped.startswith("INSERT") and "RETURNING" not in stripped.upper()
+    if returns_id:
+        q += " RETURNING id"
+    with _pg_connect() as conn:
+        return _pg_exec(conn, q, params, returns_id)
+
+
+def _pg_exec(conn, q: str, params: tuple, returns_id: bool) -> int:
+    """Executa com RETURNING id; se a tabela não tiver coluna id, cai para rowcount."""
     try:
-        cur = conn.execute(query, params)
+        cur = conn.execute(q, params)
+        row = cur.fetchone() if returns_id else None
         conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+        return row["id"] if row else cur.rowcount
+    except psycopg.errors.UndefinedColumn:
+        conn.rollback()
+        if not returns_id:
+            raise
+        cur = conn.execute(q.replace(" RETURNING id", ""), params)
+        conn.commit()
+        return cur.rowcount

@@ -145,7 +145,7 @@ def delete_prediction(user_id, prediction_id: int) -> bool:
 def stats(user_id) -> dict:
     total, correct, wrong, pending = 0, 0, 0, 0
     for r in db.run_query(
-            "SELECT status, brier_score, log_loss, COUNT(*) c FROM predictions WHERE user_id=? GROUP BY status",
+            "SELECT status, COUNT(*) c FROM predictions WHERE user_id=? GROUP BY status",
             (user_id,)):
         s, c = r["status"], r["c"]
         total += c
