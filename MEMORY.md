@@ -245,8 +245,18 @@
 - Fator de colocação/tabela no modelo — ver `skill/evolution-engine/memory/promotions/FEATURE-001.md`
 - Implementar AO FINAL dos módulos (decisão do usuário); critério: ganho em Brier/LogLoss via compare_models
 
+### 🎯 Sync Massivo Concluído (22/08/2026, madrugada)
+- **Banco final: 56 ligas · 1.257 times · 5.955 jogos jogados · 9.624 agendados**
+- Força bruta em rodadas aleatórias com backoff (`/tmp/opencode/brute_sync.py`, estado em `/tmp/opencode/brute_state.json`)
+- **Baixadas com sucesso:** MLS (533), Chile (150), Suécia (136), Paraguai Apertura (131), Eredivisie, Portugal Betclic, Dinamarca, Egito, J1 League, China×2, Inglaterra Championship/League One/National, LaLiga/LaLiga2, 2.Bundesliga/3.Liga, Bélgica, Estônia, México, Coreia, Suíça, Equador + Libertadores/Sudamericana/Copa América/Europa League/AFC CL + Copa Argentina completada
+- ⚠️ Ligas europeias/J1 com poucos jogos = temporada 2026-27 recém-começada (correto)
+- **PENDENTE (bloqueio SofaScore 403 global por ~3h+): Colômbia Primera A (sid 11539) e Peru Liga 1 (406, veio vazia)** → re-sincronizar com `sofascore_data.sync_league(cfg)` num dia tranquilo; upsert não duplica
+- **Lição registrada:** martelar retries a cada 30s MANTÉM o bloqueio vivo; silêncio total de ~20-30min foi o que destravou (Suécia/J1/Paraguai caíram logo após)
+
 ### 📋 Tasks Specifically Marked
 - [ ] Continuar sync das ligas pendentes em lotes futuros (rate limit SofaScore)
+- [ ] **Re-sincronizar Colômbia (11539) e Peru (406)** — bloqueadas em 22/08; único gap das 57 configuradas
+- [x] **Sync força bruta 11 ligas (22/08): 9/11 baixadas + bônus Copa Argentina; banco 46→56 ligas, 3.406→5.955 jogos**
 - [x] Decidir FASE 9: XGBoost real implementado — Poisson venceu → Ensemble bloqueado por evidência
 - [x] FASE 10 Market Engine ✅ (market.py + endpoints + validação)
 - [x] **Frontend: Corrigir duplicated leagues — aplicar dedup no estado `leagues` e remover duplicate refresh calls** ✅ (feito em App.jsx)
