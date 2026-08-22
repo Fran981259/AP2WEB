@@ -22,10 +22,10 @@ from . import db
 from .feature_engine import compute_team_stats, compute_match_stats
 from .model import MatchInput, TeamInput, predict as run_predict
 
-HOME_ADVANTAGE_GRID = [1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30]
-WINDOW_GRID = [5, 8, 10, 12, 15]
+HOME_ADVANTAGE_GRID = [1.05, 1.10, 1.15, 1.20, 1.25, 1.30]
+WINDOW_GRID = [5, 10, 15]
 
-MIN_SAMPLES = 30  # mínimo de jogos por liga para calibrar
+MIN_SAMPLES = 20  # mínimo de previsões por liga para calibrar
 FEATURE_GRID = ["xg", "goals", "blend"]  # features disponíveis para calibração
 
 
