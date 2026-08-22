@@ -285,9 +285,9 @@ def evolution_snapshot(user: str = Depends(current_user)):
                                     _append_history, _history_count)
     current = _snapshot(skip_regression=True)
     baseline = _load_baseline()
-    changes = _compare(current, baseline) if baseline else []
     current["api_health"] = True   # este endpoint respondendo = API online
-    current["regression_suite"] = None  # selenium só existe em dev
+    current["regression_suite"] = baseline.get("regression_suite") if baseline else None
+    changes = _compare(current, baseline) if baseline else []
     _append_history(current)  # persiste toda medição da UI
     return {
         "current": current,
