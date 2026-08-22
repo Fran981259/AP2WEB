@@ -23,7 +23,17 @@ API_HEALTH_URL = os.environ.get("AP2WEB_API_URL",
                                 "http://localhost:8000/api/health")
 
 # Métricas-chave que devem evoluir (todas walk-forward, as-of consistente)
-LEAGUES_TO_TRACK = [20, 18, 65, 23, 24]  # top 5 por jogos jogados
+LEAGUES_TO_TRACK = [
+    90, 18, 20, 65, 23, 24,   # top 6 por jogos (MLS, PL, Serie A, Argentina, Ligue 1, Buli)
+    44, 41, 60,                # Brasil B/A/Copa
+    82, 78, 14,                # Equador, Arg Copa, Uruguai
+    85, 2, 59,                 # China Super, Finlândia, Brasil C
+    91, 86, 8,                 # Chile, China League, Noruega 1Div
+    80, 7, 94,                 # Coreia, Noruega Elite, Suécia
+    4, 96, 67,                 # Irlanda, Paraguai, Libertadores
+    84, 68, 61,                # Estônia, Sudamericana, Champions
+    66, 73, 79, 9,             # Europa League, National League, México, Paraguai Clausura
+]  # 31 ligas com >=30 jogos jogados
 
 
 def _snapshot(skip_regression: bool = False) -> dict:
