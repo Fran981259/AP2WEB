@@ -3,7 +3,7 @@
 > Memória de trabalho do projeto. Sempre que voltarmos a trabalhar, ler este
 > arquivo para saber onde paramos. Manter atualizado ao final de cada sessão.
 
-## Última sessão (21/08/2026)
+## Última sessão (22/08/2026)
 
 ### ✅ EVOLUTION-001: PROP-001 + PROP-002 promovidas
 - **`tests/regression_suite.py`** — suíte de regressão obrigatória (QA): Fase A smoke API (14 checks: auth, contratos, 1X2≈1, as-of temporal) + Fase B E2E selenium (6 checks: login, sidebar, layout, previsão, abas, console). Executar após qualquer mudança cross-cutting: `backend/.venv/bin/python tests/regression_suite.py`. Primeira execução: **20/20 PASS**
@@ -319,7 +319,7 @@ nohup setsid ./start.sh > /tmp/ap2web.log 2>&1 &
 - **Rate limit do Sofascore**: após ~5-13 ligas, bloqueia com `ConnectionError` no `/seasons`. Cooldown de ~20 min restaura; GAP de 10s+ entre ligas ajuda
 - **soccerdata só existe no `.venv`** (`backend/.venv/bin/python`); `python3` do sistema não importa
 - **Bash tool tem timeout 120s** — scripts longos rodam com `setsid -f` em background
-- `MIN_SAMPLES=30` no learning.py: ligas com menos jogos são puladas (não calibradas)
+- `MIN_SAMPLES=20` no learning.py: ligas com menos de 20 previsões são puladas (não calibradas)
 - Campos `model` + `match.league_id/home_id/away_id` na resposta de previsão são necessários para salvar previsão no histórico
 - Botões "disfuncionais" no frontend = página antiga em cache → hard refresh (Ctrl+Shift+R)
 - **Todas as queries FASE 4 usam `date(m.kickoff_datetime) < date(?)`** — consistência garantida
