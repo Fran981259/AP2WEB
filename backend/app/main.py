@@ -282,17 +282,21 @@ def evolution_snapshot(user: str = Depends(current_user)):
     Cada chamada grava a medição no histórico persistente (append-only).
     """
     from .evolution_tracker import (_snapshot, _load_baseline, _compare,
-                                    _append_history, _history_count)
+                                    _append_history, _history_count,
+                                    _evolution_pct, _load_history)
     current = _snapshot(skip_regression=True)
     baseline = _load_baseline()
     current["api_health"] = True   # este endpoint respondendo = API online
     current["regression_suite"] = baseline.get("regression_suite") if baseline else None
     changes = _compare(current, baseline) if baseline else []
+    history = _load_history(limit=10**9)
+    evolution = _evolution_pct(current, history) if history else {}
     _append_history(current)  # persiste toda medição da UI
     return {
         "current": current,
         "baseline": baseline,
         "changes": changes,
+        "evolution": evolution,
         "stable": len(changes) == 0,
         "history_size": _history_count(),
         "env": "dev" if os.environ.get("AP2WEB_DEV") else "deploy",

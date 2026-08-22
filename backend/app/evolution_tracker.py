@@ -175,6 +175,34 @@ def _compare(current: dict, baseline: dict) -> list[dict]:
     return changes
 
 
+def _evolution_pct(current: dict, history: list[dict]) -> dict:
+    """Calcula % de evolução desde a primeira medição até agora.
+
+    Retorna dict[lid][metric] = {first, current, pct}.
+    Acurácia: quanto maior melhor (+% = evolução).
+    Brier/LogLoss: quanto menor melhor (-% = evolução).
+    """
+    if not history:
+        return {}
+    first = history[0]
+    result = {}
+    for lid, cur in current.get("leagues", {}).items():
+        if "error" in cur:
+            continue
+        first_league = first.get("leagues", {}).get(lid, {})
+        if not first_league or "error" in first_league:
+            continue
+        result[lid] = {}
+        for key in ("poisson_accuracy", "poisson_brier", "poisson_logloss"):
+            f_val = first_league.get(key)
+            c_val = cur.get(key)
+            if f_val is None or c_val is None or f_val == 0:
+                continue
+            pct = round((c_val - f_val) / abs(f_val) * 100, 2)
+            result[lid][key] = {"first": f_val, "current": c_val, "pct": pct}
+    return result
+
+
 def main():
     if "--baseline" in sys.argv:
         snap = _snapshot()

@@ -947,21 +947,35 @@ function Dashboard({ username, token, onLogout }) {
                     <h4 style={{ margin: '6px 0 10px' }}>🎯 Métricas atuais por liga (walk-forward)</h4>
                     <table className="runs">
                       <thead>
-                        <tr><th>Liga</th><th>Acurácia</th><th>Brier</th><th>LogLoss</th></tr>
+                        <tr><th>Liga</th><th>Acurácia</th><th>Brier</th><th>LogLoss</th><th>Evolução</th></tr>
                       </thead>
                       <tbody>
-                        {Object.entries(evol.current.leagues).map(([lid, m]) => (
-                          m.error
-                            ? <tr key={lid}><td>{lid}</td><td colSpan={3} className="muted">{m.error}</td></tr>
-                            : (
-                              <tr key={lid}>
-                                <td><b>{lid}</b></td>
-                                <td>{m.poisson_accuracy}%</td>
-                                <td>{m.poisson_brier}</td>
-                                <td>{m.poisson_logloss ?? '—'}</td>
-                              </tr>
-                            )
-                        ))}
+                        {Object.entries(evol.current.leagues).map(([lid, m]) => {
+                          if (m.error) return <tr key={lid}><td>{lid}</td><td colSpan={4} className="muted">{m.error}</td></tr>
+                          const evo = evol.evolution?.[lid]
+                          const accEvo = evo?.poisson_accuracy?.pct
+                          const brierEvo = evo?.poisson_brier?.pct
+                          const loglossEvo = evo?.poisson_logloss?.pct
+                          // acurácia: +bom; brier/logloss: -bom
+                          const formatEvo = (val, inverted) => {
+                            if (val == null) return '—'
+                            const sign = val > 0 ? '+' : ''
+                            const color = inverted ? (val < 0 ? '#22c55e' : val > 0 ? '#ef4444' : '#94a3b8') : (val > 0 ? '#22c55e' : val < 0 ? '#ef4444' : '#94a3b8')
+                            return <span style={{ color, fontWeight: 600 }}>{sign}{val.toFixed(2)}%</span>
+                          }
+                          return (
+                            <tr key={lid}>
+                              <td><b>{lid}</b></td>
+                              <td>{m.poisson_accuracy}%</td>
+                              <td>{m.poisson_brier}</td>
+                              <td>{m.poisson_logloss ?? '—'}</td>
+                              <td style={{ fontSize: '0.85em' }}>
+                                acc {formatEvo(accEvo, false)}<br/>
+                                brier {formatEvo(brierEvo, true)}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
