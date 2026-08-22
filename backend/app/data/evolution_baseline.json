@@ -1,32 +1,32 @@
 {
-  "timestamp": "2026-08-21T22:08:28.407895+00:00",
+  "timestamp": "2026-08-22T20:12:00.195164+00:00",
   "leagues": {
     "20": {
       "poisson_accuracy": 49.46,
       "poisson_brier": 0.6197,
-      "poisson_logloss": 1.0
+      "poisson_logloss": 1.033
     },
     "18": {
-      "poisson_accuracy": 48.65,
-      "poisson_brier": 0.6333,
-      "poisson_logloss": 1.0
+      "poisson_accuracy": 48.79,
+      "poisson_brier": 0.6328,
+      "poisson_logloss": 1.0524
     },
     "65": {
       "poisson_accuracy": 45.81,
       "poisson_brier": 0.6599,
-      "poisson_logloss": 1.0
+      "poisson_logloss": 1.0911
     },
     "23": {
       "poisson_accuracy": 47.47,
       "poisson_brier": 0.6259,
-      "poisson_logloss": 1.0
+      "poisson_logloss": 1.0392
     },
     "24": {
       "poisson_accuracy": 51.85,
       "poisson_brier": 0.5989,
-      "poisson_logloss": 1.0
+      "poisson_logloss": 1.005
     }
   },
   "api_health": true,
-  "regression_suite": "FAIL"
+  "regression_suite": "PASS"
 }

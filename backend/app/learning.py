@@ -13,6 +13,7 @@ Dependência: Feature Engine — única fonte de features (gf, ga, xg, xga, wind
 """
 from __future__ import annotations
 
+import math
 import threading
 from collections import deque
 from datetime import datetime
@@ -66,12 +67,13 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
         "  AND m.home_team_id IS NOT NULL AND m.away_team_id IS NOT NULL "
         "ORDER BY m.kickoff_datetime, m.id", (league_id,))
     if len(matches) < MIN_SAMPLES:
-        return {"accuracy": 0.0, "brier": 0.0, "correct": 0, "total": len(matches),
+        return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0, "correct": 0, "total": len(matches),
                 "series": []}
 
     hist: dict[int, deque] = {}
     correct = 0
     brier_sum = 0.0
+    logloss_sum = 0.0
     total = 0
     series = []
 
@@ -89,6 +91,7 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
             hit = int(fav == actual)
             correct += hit
             brier_sum += (1 - p[actual]) ** 2 + sum(p[k] ** 2 for k in p if k != actual)
+            logloss_sum += -math.log(max(p[actual], 1e-10))
             total += 1
             series.append((total, correct / total * 100))
         # Usar Feature Engine para stats da partida (unificado com prediction.py)
@@ -105,7 +108,7 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
         ah.appendleft({"gf": ga, "ga": gh})
 
     if total == 0:
-        return {"accuracy": 0.0, "brier": 0.0, "correct": 0, "total": 0, "series": []}
+        return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0, "correct": 0, "total": 0, "series": []}
 
     # amostra a cada ~5% dos jogos para uma curva suave (máx ~60 pontos)
     step = max(1, len(series) // 60)
@@ -115,6 +118,7 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
     return {
         "accuracy": round(correct / total * 100, 2),
         "brier": round(brier_sum / total, 4),
+        "logloss": round(logloss_sum / total, 4),
         "correct": correct,
         "total": total,
         "series": sampled,
