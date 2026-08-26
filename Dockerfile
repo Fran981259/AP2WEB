@@ -28,6 +28,8 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist/
 
 COPY backend/ ./backend/
 
+RUN mkdir -p /data
+
 ENV AP2WEB_DB_PATH=/data/ap2web.db
 ENV AP2WEB_SECRET=change-me-in-render
 ENV AP2WEB_ORIGINS=https://app.theprostatereview.com
