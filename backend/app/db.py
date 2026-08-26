@@ -205,6 +205,7 @@ def init_db() -> None:
         conn = get_conn()
         try:
             conn.executescript(SCHEMA)
+            _seed_leagues(conn)
             conn.commit()
         finally:
             conn.close()
@@ -213,6 +214,22 @@ def init_db() -> None:
         for stmt in _PG_SCHEMA.split(";"):
             if stmt.strip():
                 conn.execute(stmt)
+
+
+def _seed_leagues(conn: sqlite3.Connection) -> None:
+    """Insere ligas do leagues_config.py se a tabela estiver vazia."""
+    count = conn.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
+    if count > 0:
+        return
+    try:
+        from .leagues_config import LEAGUES
+    except ImportError:
+        return
+    for lg in LEAGUES:
+        conn.execute(
+            "INSERT OR IGNORE INTO leagues(sofascore_id, name, country) VALUES(?,?,?)",
+            (lg["id"], lg["name"], lg["country"]))
+    conn.commit()
 
 
 def reset_db() -> None:
