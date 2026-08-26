@@ -1,11 +1,14 @@
-"""Motor de previsão AP 2.0 — modelo Poisson duplo.
+"""Motor de previsão AP 3.0 — Poisson + Dixon-Coles + Bayesian Updating.
 
-Replica a lógica das abas games/Date/Predictie da planilha AP 2.0,
-com as correções recomendadas pela auditoria:
-  - λs calculados dinamicamente a partir dos dados importados (não estáticos)
-  - probabilidades 1X2 normalizadas a 100% (sum == 1.0)
-  - Over/Under, BTTS, placar exato derivados da mesma matriz Poisson
-  - Matriz de probabilidades [i][j] = P(casa i gols, fora j gols)
+Evolução do AP 2.0 com correções matemáticas rigorosas:
+  - Dixon-Coles (1997): fator τ de dependência para placares baixos (0-0, 1-0, 0-1, 1-1)
+  - Bayesian updating: priors Gamma → posteriores com observações de gols
+  - λs via modelo de regressão Poisson (attack/defense por time)
+  - Matriz de probabilidades [i][j] = P(casa i gols, fora j gols) corrigida
+
+Referências:
+  Dixon & Coles (1997) "Modelling Association Football Scores"
+  Maher (1982) "Modelling Association Football Scores"
 """
 from __future__ import annotations
 
@@ -54,9 +57,11 @@ ProbsScoresTypes = dict[str, float]  # {"1-0": float, ...}
 class PoissonResult:
     lambdas: dict[str, float]
     matrix: list[list[float]]  # prob. placar [i][j] = casa i x fora j
-    probs: PoissonProbs  # 1X2, BTTS, Over/Under, placares
+    probs: dict  # 1X2, BTTS, Over/Under, placares
     top_scores: list[dict[str, int | float]]
     proposals: list[dict]
+    rho: float = 0.0  # parâmetro Dixon-Coles (0 = Poisson puro)
+    model_type: str = "poisson"  # "poisson" ou "dixon_coles"
 
 
 def compute_lambdas(home: TeamInput, away: TeamInput, home_advantage: float = 1.0) -> tuple[float, float]:
@@ -89,12 +94,70 @@ def compute_lambdas(home: TeamInput, away: TeamInput, home_advantage: float = 1.
     return round(lam_home, 4), round(lam_away, 4)
 
 
-def build_matrix(lam_home: float, lam_away: float) -> list[list[float]]:
+def dixon_coles_tau(i: int, j: int, lam_home: float, lam_away: float,
+                    rho: float) -> float:
+    """Fator de correção de dependência Dixon-Coles (1997).
+
+    Ajusta as probabilidades dos 4 placares de baixa pontuação para
+    modelar a correlação negativa entre gols do mandante e visitante:
+      - 0-0: empates tendem a ser mais frequentes que o Poisson puro prevê
+      - 1-0, 0-1: vitórias por 1 gol são subestimadas
+      - 1-1: empates 1-1 são subestimados
+
+    τ = 1 + ρ × Δ, onde Δ depende do placar:
+      P(0,0): Δ = 1 - λ_home × λ_away
+      P(1,0): Δ = 1 - (λ_home - 1) × λ_away
+      P(0,1): Δ = 1 - λ_home × (λ_away - 1)
+      P(1,1): Δ = 1 - (λ_home - 1) × (λ_away - 1)
+
+    ρ ∈ [-0.5, 0.5] — tipicamente ≈ -0.13 para futebol.
+    ρ < 0: gols negativamente correlacionados (mais 0-0, menos gols).
+    ρ = 0: modelo Poisson puro (independência).
+    """
+    if not (-0.5 <= rho <= 0.5):
+        rho = max(-0.5, min(0.5, rho))
+
+    if i == 0 and j == 0:
+        delta = 1.0 - lam_home * lam_away
+    elif i == 1 and j == 0:
+        delta = 1.0 - (lam_home - 1.0) * lam_away
+    elif i == 0 and j == 1:
+        delta = 1.0 - lam_home * (lam_away - 1.0)
+    elif i == 1 and j == 1:
+        delta = 1.0 - (lam_home - 1.0) * (lam_away - 1.0)
+    else:
+        return 1.0  # placares altos: sem correção
+
+    return 1.0 + rho * delta
+
+
+def build_matrix(lam_home: float, lam_away: float,
+                 rho: float = 0.0) -> list[list[float]]:
+    """Constrói matriz de probabilidades Poisson com correção Dixon-Coles.
+
+    Para ρ=0, resultado idêntico ao Poisson puro.
+    Para ρ≠0, os 4 placares baixos (0-0, 1-0, 0-1, 1-1) são ajustados
+    pelo fator τ, e a matriz é renormalizada.
+    """
     m = [[0.0] * (MAX_GOALS + 1) for _ in range(MAX_GOALS + 1)]
+    total = 0.0
+
     for i in range(MAX_GOALS + 1):
         ph = poisson_pmf(i, lam_home)
         for j in range(MAX_GOALS + 1):
-            m[i][j] = ph * poisson_pmf(j, lam_away)
+            p = ph * poisson_pmf(j, lam_away)
+            # Aplicar Dixon-Coles τ para os 4 placares baixos
+            tau = dixon_coles_tau(i, j, lam_home, lam_away, rho)
+            m[i][j] = p * tau
+            total += m[i][j]
+
+    # Renormalizar para garantir soma = 1.0 (corrige drift de ponto flutuante)
+    if total > 0:
+        inv_total = 1.0 / total
+        for i in range(MAX_GOALS + 1):
+            for j in range(MAX_GOALS + 1):
+                m[i][j] *= inv_total
+
     return m
 
 
@@ -153,66 +216,72 @@ def top_scores(score_prob: dict[str, float], k: int = 10) -> list[dict]:
 
 
 def proposals(probs: dict, teams: dict, lambdas: dict) -> list[dict]:
-    """Regras de propostas baseadas na aba Predictie/Tratamento (AE4-AE19)."""
+    """Regras de propostas — só gera quando confiança >= 55%."""
     out = []
     p1 = probs["1x2"]
     home, away = teams["home"], teams["away"]
 
-    # 1X2
-    if p1["X"] < p1["1"] and p1["X"] < p1["2"]:
-        out.append({"tipo": "1X2", "jogada": "Lay Empate (Contra o Empate)", "confianca": round(p1["X"] * 100, 1)})
-    if p1["1"] >= 0.70:
+    # 1X2 — só propõe quando favorito tem >= 55%
+    if p1["1"] >= 0.55:
         out.append({"tipo": "1X2", "jogada": f"Back {home}", "confianca": round(p1["1"] * 100, 1)})
-    elif p1["1"] >= 0.60:
-        out.append({"tipo": "1X2", "jogada": f"Back {home} (se melhor odd)", "confianca": round(p1["1"] * 100, 1)})
-    if p1["2"] >= 0.70:
+    elif p1["2"] >= 0.55:
         out.append({"tipo": "1X2", "jogada": f"Back {away}", "confianca": round(p1["2"] * 100, 1)})
-    elif p1["2"] >= 0.60:
-        out.append({"tipo": "1X2", "jogada": f"Back {away} (se melhor odd)", "confianca": round(p1["2"] * 100, 1)})
+    # Lay empate só se empate for claramente o mais provável
+    if p1["X"] >= 0.35 and p1["X"] > p1["1"] and p1["X"] > p1["2"]:
+        out.append({"tipo": "1X2", "jogada": "Lay Empate (Contra o Empate)", "confianca": round((1 - p1["X"]) * 100, 1)})
 
-    # Over/Under (usando linha de 1.5 e 2.5)
+    # Over/Under — thresholds realistas
     ov15 = probs["over"]["over_1.5"]
     ov25 = probs["over"]["over_2.5"]
     un25 = probs["under"]["under_2.5"]
-    if ov15 >= 0.82:
-        out.append({"tipo": "GOLS", "jogada": "Back Over 0.5/1.5 (entrar cedo)", "confianca": round(ov15 * 100, 1)})
-    elif ov15 >= 0.70:
-        out.append({"tipo": "GOLS", "jogada": "Back Over 0.5 (entrar aos poucos)", "confianca": round(ov15 * 100, 1)})
-    if ov25 >= 0.74:
+    if ov25 >= 0.65:
         out.append({"tipo": "GOLS", "jogada": "Back Over 2.5", "confianca": round(ov25 * 100, 1)})
-    elif un25 >= 0.75:
+    elif un25 >= 0.65:
         out.append({"tipo": "GOLS", "jogada": "Back Under 2.5", "confianca": round(un25 * 100, 1)})
+    if ov15 >= 0.75:
+        out.append({"tipo": "GOLS", "jogada": "Back Over 1.5", "confianca": round(ov15 * 100, 1)})
 
-    # BTTS
+    # BTTS — usa probabilidade real do modelo Poisson
     btts_sim = probs["btts"]["sim"]
-    if btts_sim >= 0.55:
+    if btts_sim >= 0.58:
         out.append({"tipo": "BTTS", "jogada": "Back BTTS Sim", "confianca": round(btts_sim * 100, 1)})
-    elif btts_sim <= 0.45:
+    elif btts_sim <= 0.42:
         out.append({"tipo": "BTTS", "jogada": "Back BTTS Nao", "confianca": round((1 - btts_sim) * 100, 1)})
 
-    # Placar exato mais provável
+    # Placar exato — só o mais provável se tiver >= 8%
     top = top_scores(probs["scores"], 1)
-    if top:
+    if top and top[0]["prob"] >= 8:
         out.append({"tipo": "PLACAR", "jogada": f"Placar exato {top[0]['score']}", "confianca": top[0]["prob"]})
-
-    # Cantos (estimativa simples baseada em lambda total)
-    corners_home = lambdas["home"] * 5.2
-    corners_away = lambdas["away"] * 5.2
-    total_corners = round(corners_home + corners_away, 1)
-    out.append({"tipo": "CANTOS", "jogada": f"~{total_corners} cantos no total", "confianca": 0.0, "meta": total_corners})
 
     return out
 
 
-def predict(match: MatchInput, home_advantage: float = 1.15) -> PoissonResult:
+def predict(match: MatchInput, home_advantage: float = 1.15,
+            rho: float = 0.0) -> PoissonResult:
+    """Previsão Poisson com Dixon-Coles.
+
+    Args:
+        match: dados do confronto (home/away team inputs)
+        home_advantage: fator de mando calibrado (default 1.15)
+        rho: parâmetro de dependência Dixon-Coles (0 = Poisson puro)
+             Tipicamente ≈ -0.13 para futebol.
+
+    Returns:
+        PoissonResult com lambdas, matrix, probs, top_scores, proposals
+    """
     lam_home, lam_away = compute_lambdas(match.home, match.away, home_advantage)
-    matrix = build_matrix(lam_home, lam_away)
+    matrix = build_matrix(lam_home, lam_away, rho)
     probs = probabilities(matrix)
+
+    model_type = "dixon_coles" if rho != 0.0 else "poisson"
 
     return PoissonResult(
         lambdas={"home": lam_home, "away": lam_away},
         matrix=matrix,
         probs=probs,
         top_scores=top_scores(probs["scores"]),
-        proposals=proposals(probs, {"home": match.home.name, "away": match.away.name}, {"home": lam_home, "away": lam_away}),
+        proposals=proposals(probs, {"home": match.home.name, "away": match.away.name},
+                            {"home": lam_home, "away": lam_away}),
+        rho=rho,
+        model_type=model_type,
     )

@@ -40,11 +40,21 @@ def _log_loss(prob_correct: float) -> float:
         return 99.0
 
 
+def _normalize_prob(p: float) -> float:
+    """Normaliza probabilidade para 0-1. Se > 1.0, assume que está em %."""
+    if p is None:
+        return 0.5
+    if p > 1.0:
+        return p / 100.0
+    return p
+
+
 def _result_of_pick_v2(pick_type: str, pick_value: str, ft_home, ft_away,
                        prob_home: float) -> dict | None:
     """Retorna dicionário com result, brier, log_loss para a previsão."""
     if ft_home is None or ft_away is None:
         return None
+    prob_home = _normalize_prob(prob_home)
     try:
         fh, fa = int(ft_home), int(ft_away)
     except (TypeError, ValueError):
@@ -125,6 +135,7 @@ def save_prediction(user_id, data: dict) -> dict:
 
 
 def list_predictions(user_id, limit: int = 200) -> list[dict]:
+    resolve_predictions(user_id)
     rows = db.run_query(
         "SELECT * FROM predictions WHERE user_id=? ORDER BY id DESC LIMIT ?",
         (user_id, limit))
@@ -143,6 +154,7 @@ def delete_prediction(user_id, prediction_id: int) -> bool:
 
 
 def stats(user_id) -> dict:
+    resolve_predictions(user_id)
     total, correct, wrong, pending = 0, 0, 0, 0
     for r in db.run_query(
             "SELECT status, COUNT(*) c FROM predictions WHERE user_id=? GROUP BY status",

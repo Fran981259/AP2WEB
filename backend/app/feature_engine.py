@@ -12,6 +12,7 @@ Princípio: same data → same features → reproducible results.
 
 from __future__ import annotations
 from collections import deque
+from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 
@@ -32,8 +33,8 @@ def parse_stat_value(v) -> Optional[float]:
             return None
 
 
-def compute_team_stats(
-    history: deque,
+def _compute_team_stats_inner(
+    history_tuple: tuple,
     window: int,
     feature: str,
 ) -> dict:
@@ -51,15 +52,14 @@ def compute_team_stats(
     gf_sum, ga_sum = 0.0, 0.0
     xg_sum, xga_sum = 0.0, 0.0
 
-    for h in history:
+    for h in history_tuple:
         if n >= window:
             break
-        gf = h.get("gf") or 0.0
-        ga = h.get("ga") or 0.0
-
-        # Obter xG da partida (podem vir do banco ou serem None)
-        xg_home = h.get("xg_home")
-        xg_away = h.get("xg_away")
+        # h é uma tupla (gf, ga, xg_home, xg_away) vindos do cache
+        gf = h[0] if h[0] is not None else 0.0
+        ga = h[1] if h[1] is not None else 0.0
+        xg_home = h[2]  # pode ser None
+        xg_away = h[3]  # pode ser None
 
         if feature == "xg":
             # Usar xG disponível; seNone, cair back para gols
@@ -107,6 +107,34 @@ def compute_team_stats(
         result["xga_avg"] = None
 
     return result
+
+
+@lru_cache(maxsize=2048)
+def _cached_team_stats(history_tuple: tuple, window: int, feature: str) -> dict:
+    """Cache wrapper — evita recomputação para mesmos inputs."""
+    return _compute_team_stats_inner(history_tuple, window, feature)
+
+
+def compute_team_stats(
+    history: deque,
+    window: int,
+    feature: str,
+) -> dict:
+    """Computa gf_avg, ga_avg (e derivados) para um time usando os últimos `window` jogos.
+
+    Parâmetros:
+      history: deque de {"gf": float, "ga": float} — gols marcados/sofridos por jogo
+      window: número de jogos para considerar (últimos N)
+      feature: "xg" → usa xG do banco; "goals" → usa gols reais; "blend" → média
+
+    Retorna:
+      {"gf_avg": float, "ga_avg": float, "xg_avg": float | None, "xga_avg": float | None}
+    """
+    history_tuple = tuple(
+        (h.get("gf"), h.get("ga"), h.get("xg_home"), h.get("xg_away"))
+        for h in history
+    )
+    return _cached_team_stats(history_tuple, window, feature)
 
 
 def compute_match_stats(

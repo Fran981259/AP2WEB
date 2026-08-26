@@ -55,6 +55,12 @@ def _startup():
     db.init_db()
 
 
+@app.on_event("shutdown")
+def _shutdown():
+    if db.MODE == "postgres":
+        db._pool.close()
+
+
 class RegisterBody(BaseModel):
     username: str
     password: str
@@ -274,6 +280,56 @@ def market_league(league_id: int, limit: int = 20,
     return market_league(league_id, limit, as_of)
 
 
+# --------------------------- FASE 11 — Risk Engine ---------------------------
+
+class RiskConfigBody(BaseModel):
+    kelly_fraction: float = 0.25
+    bankroll: float = 1000.0
+    max_stake_pct: float = 0.05
+    max_exposure_pct: float = 0.15
+    max_daily_pct: float = 0.25
+    min_edge: float = 0.02
+    min_prob: float = 0.30
+    max_odds: float = 10.0
+
+
+@app.get("/api/risk/{match_id}", tags=["risk"])
+def risk_match(match_id: int, as_of: str | None = None,
+               kelly_fraction: float = 0.25,
+               bankroll: float = 1000.0,
+               user: str = Depends(current_user)):
+    """FASE 11 — Risk Engine: Kelly fracionado, limites, score de confiança."""
+    from .risk import risk_for_match, RiskConfig
+    cfg = RiskConfig(kelly_fraction=kelly_fraction, bankroll=bankroll)
+    try:
+        return risk_for_match(match_id, cfg, as_of)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Partida não encontrada")
+
+
+@app.get("/api/risk/league/{league_id}", tags=["risk"])
+def risk_league_endpoint(league_id: int, limit: int = 20,
+                         as_of: str | None = None,
+                         kelly_fraction: float = 0.25,
+                         bankroll: float = 1000.0,
+                         user: str = Depends(current_user)):
+    """FASE 11 — Risk Engine: avaliação de risco para jogos de uma liga."""
+    from .risk import risk_league, RiskConfig
+    cfg = RiskConfig(kelly_fraction=kelly_fraction, bankroll=bankroll)
+    return risk_league(league_id, limit, cfg, as_of)
+
+
+@app.post("/api/risk/portfolio", tags=["risk"])
+def risk_portfolio(matches: list[int], kelly_fraction: float = 0.25,
+                   bankroll: float = 1000.0,
+                   user: str = Depends(current_user)):
+    """FASE 11 — Risk Engine: análise de portfólio multi-jogo."""
+    from .risk import risk_for_match, portfolio_risk, RiskConfig
+    cfg = RiskConfig(kelly_fraction=kelly_fraction, bankroll=bankroll)
+    matches_risk = [risk_for_match(mid, cfg) for mid in matches]
+    return portfolio_risk(matches_risk, cfg)
+
+
 @app.get("/api/evolution/snapshot", tags=["evolution"])
 def evolution_snapshot(user: str = Depends(current_user)):
     """Snapshot atual do rastreador de evolução (baseline + delta vs anterior).
@@ -313,6 +369,70 @@ def evolution_history(limit: int = 50, user: str = Depends(current_user)):
         "history": history,
         "series": _trend_series(history),
     }
+
+
+# --------------------------- Backtest Engine ---------------------------
+
+@app.post("/api/backtest/start", tags=["backtest"])
+def backtest_start(interval_hours: float = 6.0, user: str = Depends(current_user)):
+    """Inicia o loop de backtest contínuo em background."""
+    from .backtest_engine import get_loop
+    return get_loop().start(interval_hours)
+
+
+@app.post("/api/backtest/stop", tags=["backtest"])
+def backtest_stop(user: str = Depends(current_user)):
+    """Para o loop de backtest."""
+    from .backtest_engine import get_loop
+    return get_loop().stop()
+
+
+@app.get("/api/backtest/status", tags=["backtest"])
+def backtest_status(user: str = Depends(current_user)):
+    """Estado atual do loop de backtest."""
+    from .backtest_engine import get_loop
+    return get_loop().status()
+
+
+@app.post("/api/backtest/run", tags=["backtest"])
+def backtest_run(league_ids: list[int] | None = None,
+                 user: str = Depends(current_user)):
+    """Executa um único ciclo de backtest (síncrono)."""
+    from .backtest_engine import get_loop
+    return get_loop().run_single_cycle(league_ids)
+
+
+@app.get("/api/backtest/cv/{league_id}", tags=["backtest"])
+def backtest_temporal_cv(league_id: int, n_folds: int = 5,
+                         user: str = Depends(current_user)):
+    """Cross-validation temporal para uma liga."""
+    from .backtest_engine import temporal_cv
+    return temporal_cv(league_id, n_folds)
+
+
+@app.get("/api/backtest/history", tags=["backtest"])
+def backtest_history(limit: int = 20, user: str = Depends(current_user)):
+    """Histórico de ciclos de backtest."""
+    from .backtest_engine import get_loop
+    return {"history": get_loop().get_history(limit), "total": len(get_loop().get_history(1000))}
+
+
+@app.get("/api/backtest/meta", tags=["backtest"])
+def backtest_meta(user: str = Depends(current_user)):
+    """Histórico do meta-learner (hiperparâmetros testados)."""
+    from .backtest_engine import get_loop
+    loop = get_loop()
+    return {
+        "total_records": len(loop.meta.history),
+        "recent": loop.meta.history[-50:],
+    }
+
+
+@app.get("/api/backtest/summary", tags=["backtest"])
+def backtest_summary(user: str = Depends(current_user)):
+    """Resumo geral: evolução/volução por liga, propostas e acertos."""
+    from .backtest_engine import get_loop
+    return get_loop().get_summary()
 
 
 @app.get("/api/health", tags=["misc"])

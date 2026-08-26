@@ -165,9 +165,20 @@ function Dashboard({ username, token, onLogout }) {
   const [sofaTeamFilter, setSofaTeamFilter] = useState('')
   const [sofaRoundFilter, setSofaRoundFilter] = useState('')
 
+  const [histLoading, setHistLoading] = useState(false)
+
   const [evol, setEvol] = useState(null)
   const [evolLoading, setEvolLoading] = useState(false)
   const [evolHist, setEvolHist] = useState(null)
+
+  const [btStatus, setBtStatus] = useState(null)
+  const [btHistory, setBtHistory] = useState(null)
+  const [btMeta, setBtMeta] = useState(null)
+  const [btCvResult, setBtCvResult] = useState(null)
+  const [btRunning, setBtRunning] = useState(false)
+  const [btInterval, setBtInterval] = useState(6)
+  const [btTimer, setBtTimer] = useState(null)
+  const [btSummary, setBtSummary] = useState(null)
 
   async function refreshLeagues() {
     const raw = await api.leagues(token)
@@ -186,9 +197,12 @@ function Dashboard({ username, token, onLogout }) {
 
   useEffect(() => () => clearInterval(calTimer), [calTimer])
   useEffect(() => () => clearInterval(sofaTimer), [sofaTimer])
+  useEffect(() => () => clearInterval(btTimer), [btTimer])
 
   async function loadHistory() {
+    setHistLoading(true)
     try { setHist(await api.predictions(token)) } catch (e) { setError(e.message) }
+    setHistLoading(false)
   }
 
   async function loadLearning() {
@@ -270,6 +284,60 @@ function Dashboard({ username, token, onLogout }) {
     try {
       setEvolHist(await api.evolutionHistory(50, token))
     } catch (e) { /* histórico é opcional — não bloqueia a aba */ }
+  }
+
+  async function loadBtStatus() {
+    try { setBtStatus(await api.backtestStatus(token)) } catch (e) { setError(e.message) }
+    try { setBtHistory(await api.backtestHistory(10, token)) } catch (e) {}
+    try { setBtMeta(await api.backtestMeta(token)) } catch (e) {}
+    try { setBtSummary(await api.backtestSummary(token)) } catch (e) {}
+  }
+
+  async function startBtLoop() {
+    setBtRunning(true); setError('')
+    try {
+      await api.backtestStart(btInterval, token)
+      clearInterval(btTimer)
+      const t = setInterval(async () => {
+        try {
+          const s = await api.backtestStatus(token)
+          setBtStatus(s)
+          if (!s.running) {
+            clearInterval(t); setBtTimer(null)
+            loadBtStatus()
+          }
+        } catch {}
+      }, 3000)
+      setBtTimer(t)
+    } catch (e) { setError(e.message) }
+    setBtRunning(false)
+  }
+
+  async function stopBtLoop() {
+    try {
+      await api.backtestStop(token)
+      clearInterval(btTimer); setBtTimer(null)
+      loadBtStatus()
+    } catch (e) { setError(e.message) }
+  }
+
+  async function runBtCycle(leagueIds = null) {
+    setBtRunning(true); setError(''); setBtCvResult(null)
+    try {
+      const result = await api.backtestRun(leagueIds, token)
+      setBtCvResult(result)
+      loadBtStatus()
+    } catch (e) { setError(e.message) }
+    setBtRunning(false)
+  }
+
+  async function runBtCV(leagueId) {
+    setBtRunning(true); setError(''); setBtCvResult(null)
+    try {
+      const cv = await api.backtestCV(leagueId, 5, token)
+      setBtCvResult(cv)
+    } catch (e) { setError(e.message) }
+    setBtRunning(false)
   }
 
   async function onCfLeagueChange(leagueId) {
@@ -386,6 +454,7 @@ function Dashboard({ username, token, onLogout }) {
           <button className={tab === 'dados' ? 'active' : ''} onClick={() => setTab('dados')}>Dados</button>
           <button className={tab === 'sofascore' ? 'active' : ''} onClick={() => setTab('sofascore')}>Sofascore</button>
           <button className={tab === 'evolucao' ? 'active' : ''} onClick={() => { setTab('evolucao'); loadEvolution(); loadEvolutionHistory() }}>📈 Evolução</button>
+          <button className={tab === 'backtest' ? 'active' : ''} onClick={() => { setTab('backtest'); loadBtStatus() }}>🔬 Backtest Engine</button>
         </nav>
         <div className="user">
           <span>{username}</span>
@@ -544,7 +613,9 @@ function Dashboard({ username, token, onLogout }) {
           <section className="panel">
             <div className="panel-head">
               <h3>Minhas previsões</h3>
-              <button className="btn-small" onClick={loadHistory}>Atualizar</button>
+              <button className="btn-small" onClick={loadHistory} disabled={histLoading}>
+                {histLoading ? 'Carregando...' : 'Atualizar'}
+              </button>
             </div>
             {hist && hist.items.length === 0 && <p className="muted">Nenhuma previsão salva ainda.</p>}
             <div className="table-scroll">
@@ -583,8 +654,6 @@ function Dashboard({ username, token, onLogout }) {
                 {cal && cal.running ? `Calibrando ${cal.done}/${cal.total}...` : '⚡ Recalibrar todas'}
               </button>
             </div>
-
-            {learn && <NeuralNet learn={learn} cal={cal} />}
 
             {!learn && <div className="muted small" style={{ padding: '14px 0' }}>Carregando estado do aprendizado...</div>}
 
@@ -1013,6 +1082,420 @@ function Dashboard({ username, token, onLogout }) {
           </section>
         </main>
       )}
+
+      {tab === 'backtest' && (
+        <main className="column">
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h3>🔬 Backtest Engine</h3>
+                <p className="muted small">
+                  Ciclo contínuo de backtest, cross-validation temporal e meta-learning.
+                  O sistema aprende com erros anteriores e recalibra automaticamente.
+                </p>
+              </div>
+              <div className="btn-row">
+                <label className="inline">
+                  Intervalo (horas)
+                  <input type="number" value={btInterval} min={1} max={48}
+                         onChange={e => setBtInterval(Number(e.target.value))}
+                         style={{ width: 60 }} />
+                </label>
+                {btStatus?.running ? (
+                  <button className="btn-small" onClick={stopBtLoop} disabled={!btStatus.running}>
+                    ⏹ Parar loop
+                  </button>
+                ) : (
+                  <button className="btn-primary" onClick={startBtLoop} disabled={btRunning}>
+                    {btRunning ? 'Rodando...' : '▶ Iniciar loop'}
+                  </button>
+                )}
+                <button className="btn-primary" onClick={() => runBtCycle()} disabled={btRunning}>
+                  {btRunning ? 'Rodando...' : '⚡ Rodar ciclo agora'}
+                </button>
+              </div>
+            </div>
+
+            {/* Status do loop */}
+            {btStatus && (
+              <div className="hist-stats" style={{ marginTop: 12 }}>
+                <Stat label="Status" value={btStatus.running ? '🟢 Rodando' : '⏹ Parado'} ok={btStatus.running} />
+                <Stat label="Ciclos" value={btStatus.cycle_count || 0} />
+                <Stat label="Último ciclo" value={btStatus.last_cycle_at ? new Date(btStatus.last_cycle_at).toLocaleString() : 'nunca'} />
+                <Stat label="Intervalo" value={`${btStatus.interval_hours || 6}h`} />
+                <Stat label="Meta records" value={btStatus.meta_history_count || 0} />
+              </div>
+            )}
+
+            {/* Fase atual */}
+            {btStatus?.current_phase && btStatus.running && (
+              <div className="batch-progress" style={{ marginTop: 12 }}>
+                <p className="muted small">
+                  🔄 {btStatus.current_phase}
+                  {btStatus.current_league ? ` · ${btStatus.current_league}` : ''}
+                </p>
+              </div>
+            )}
+
+            {/* Resultado do último ciclo */}
+            {btStatus?.cycle_results?.length > 0 && (
+              <div className="table-scroll" style={{ marginTop: 14 }}>
+                <h4 style={{ margin: '6px 0 10px' }}>📊 Resultados do último ciclo</h4>
+                <table className="runs">
+                  <thead>
+                    <tr>
+                      <th>Liga</th>
+                      <th>Feature</th>
+                      <th>HA</th>
+                      <th>Jan</th>
+                      <th>Rho</th>
+                      <th>Accuracy</th>
+                      <th>Brier</th>
+                      <th>CV Brier</th>
+                      <th>Promovido</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {btStatus.cycle_results.map((r, i) => (
+                      <tr key={i}>
+                        <td><b>{r.league_name}</b></td>
+                        <td>{r.current_params?.feature}</td>
+                        <td>{r.current_params?.home_advantage?.toFixed(2)}</td>
+                        <td>{r.current_params?.window}</td>
+                        <td>{r.current_params?.rho?.toFixed(3)}</td>
+                        <td>{r.backtest?.accuracy?.toFixed(1)}%</td>
+                        <td>{r.backtest?.brier?.toFixed(4)}</td>
+                        <td>{r.cv?.mean_brier?.toFixed(4)}</td>
+                        <td>{r.promoted ? '✅' : r.error ? '❌' : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          {/* Cross-Validation */}
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h4>📐 Cross-Validation Temporal</h4>
+                <p className="muted small">
+                  Validação em K folds cronológicos — treina no passado, testa no futuro.
+                  Zero data leakage.
+                </p>
+              </div>
+              <select value="" onChange={e => { if (e.target.value) runBtCV(Number(e.target.value)) }}
+                      disabled={btRunning}>
+                <option value="">Selecionar liga para CV...</option>
+                {leagues.map(l => (
+                  <option key={l.id} value={l.id}>{flag(l.country)} {l.name} ({l.played} jogos)</option>
+                ))}
+              </select>
+            </div>
+
+            {btCvResult && btCvResult.folds && (
+              <div style={{ marginTop: 12 }}>
+                <div className="hist-stats">
+                  <Stat label="Acurácia média" value={`${btCvResult.mean_accuracy}%`} ok={btCvResult.mean_accuracy > 50} />
+                  <Stat label="Brier médio" value={btCvResult.mean_brier?.toFixed(4)} />
+                  <Stat label="Desvio acc" value={`±${btCvResult.std_accuracy}%`} />
+                  <Stat label="Desvio Brier" value={`±${btCvResult.std_brier}`} />
+                  <Stat label="Folds" value={btCvResult.n_folds} />
+                </div>
+                <div className="table-scroll" style={{ marginTop: 10 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr><th>Fold</th><th>Treino</th><th>Teste</th><th>Accuracy</th><th>Brier</th></tr>
+                    </thead>
+                    <tbody>
+                      {btCvResult.folds.map(f => (
+                        <tr key={f.fold}>
+                          <td>Fold {f.fold}</td>
+                          <td>{f.train_size} jogos</td>
+                          <td>{f.test_size} jogos</td>
+                          <td>{f.accuracy}%</td>
+                          <td>{f.brier?.toFixed(4)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {btCvResult && btCvResult.folds && btCvResult.folds.length > 1 && (
+              <div style={{ marginTop: 12 }}>
+                <LineChart
+                  data={btCvResult.folds.map(f => ({ x: f.fold, y: f.accuracy }))}
+                  title="Acurácia por fold temporal"
+                  xLabel="Fold" yLabel="Acurácia %"
+                />
+              </div>
+            )}
+          </section>
+
+          {/* Meta-Learning */}
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <h4>🧠 Meta-Learning (Bayesian Optimization)</h4>
+                <p className="muted small">
+                  Histórico de hiperparâmetros testados e seus resultados.
+                  O sistema aprende quais combinações funcionam melhor.
+                </p>
+              </div>
+              <button className="btn-small" onClick={loadBtStatus}>🔄 Atualizar</button>
+            </div>
+
+            {btMeta && btMeta.recent?.length > 0 && (
+              <div className="table-scroll" style={{ marginTop: 12 }}>
+                <p className="muted small">📊 {btMeta.total_records} registros no histórico do meta-learner</p>
+                <table className="runs" style={{ marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      <th>Liga</th><th>Feature</th><th>Window</th><th>HA</th><th>Rho</th>
+                      <th>Accuracy</th><th>Brier</th><th>Data</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...btMeta.recent].reverse().slice(0, 20).map((h, i) => (
+                      <tr key={i}>
+                        <td>{h.league_id}</td>
+                        <td>{h.feature}</td>
+                        <td>{h.window}</td>
+                        <td>{h.home_advantage?.toFixed(2)}</td>
+                        <td>{h.rho?.toFixed(3)}</td>
+                        <td>{h.accuracy?.toFixed(1)}%</td>
+                        <td>{h.brier?.toFixed(4)}</td>
+                        <td className="muted small">{h.timestamp?.slice(0, 16)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {btMeta && btMeta.recent?.length === 0 && (
+              <p className="muted small" style={{ padding: '14px 0' }}>
+                Nenhum registro ainda. Execute um ciclo de backtest para alimentar o meta-learner.
+              </p>
+            )}
+          </section>
+
+          {/* Histórico de ciclos */}
+          <section className="panel">
+            <div className="panel-head">
+              <h4>📋 Histórico de ciclos</h4>
+              <button className="btn-small" onClick={loadBtStatus}>🔄 Atualizar</button>
+            </div>
+            {btHistory?.history?.length > 0 ? (
+              <div className="table-scroll" style={{ marginTop: 12 }}>
+                <table className="runs">
+                  <thead>
+                    <tr><th>Data</th><th>Ligas</th><th>Sugestões</th><th>Status</th></tr>
+                  </thead>
+                  <tbody>
+                    {[...btHistory.history].reverse().map((c, i) => (
+                      <tr key={i}>
+                        <td>{new Date(c.timestamp).toLocaleString()}</td>
+                        <td>{c.leagues_processed}</td>
+                        <td>{c.meta_suggestions}</td>
+                        <td><span className="badge ok">concluído</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted small" style={{ padding: '14px 0' }}>
+                Nenhum ciclo executado ainda. Clique em "Rodar ciclo agora" para iniciar.
+              </p>
+            )}
+          </section>
+
+          {/* Resumo Geral — Evolução/Propostas */}
+          {btSummary && btSummary.leagues?.length > 0 && (
+            <>
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h4>📈 Resumo Geral — Evolução vs Involução</h4>
+                    <p className="muted small">
+                      Comparação entre ciclos. 🟢 evolução · 🟡 estável · 🔴 involução.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="hist-stats" style={{ marginTop: 12 }}>
+                  <Stat label="Acurácia geral" value={`${btSummary.overall.accuracy}%`} ok={btSummary.overall.accuracy > 50} />
+                  <Stat label="Brier geral" value={btSummary.overall.brier?.toFixed(4)} />
+                  <Stat label="Acertos" value={btSummary.overall.correct} ok />
+                  <Stat label="Erros" value={btSummary.overall.wrong} bad />
+                  <Stat label="Ligas" value={btSummary.overall.leagues_count} />
+                </div>
+
+                <div className="hist-stats" style={{ marginTop: 8 }}>
+                  <Stat label="🟢 Evoluíram" value={btSummary.overall.evolved} ok={btSummary.overall.evolved > 0} />
+                  <Stat label="🟡 Estáveis" value={btSummary.overall.stable} />
+                  <Stat label="🔴 Reverteram" value={btSummary.overall.involved} bad={btSummary.overall.involved > 0} />
+                </div>
+
+                <div className="table-scroll" style={{ marginTop: 14 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr>
+                        <th>Trend</th>
+                        <th>Liga</th>
+                        <th>Accuracy</th>
+                        <th>Δ Acc</th>
+                        <th>Brier</th>
+                        <th>Δ Brier</th>
+                        <th>Acertos</th>
+                        <th>Erros</th>
+                        <th>% Erro</th>
+                        <th>Promovido</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {btSummary.leagues.map((l, i) => {
+                        const trendIcon = l.trend === 'evolution' ? '🟢' : l.trend === 'involution' ? '🔴' : '🟡'
+                        const trendColor = l.trend === 'evolution' ? '#22c55e' : l.trend === 'involution' ? '#ef4444' : '#eab308'
+                        const errorRate = l.total > 0 ? (l.wrong / l.total * 100).toFixed(1) : 0
+                        return (
+                          <tr key={i}>
+                            <td style={{ fontSize: '1.2em' }}>{trendIcon}</td>
+                            <td><b>{l.league_name}</b></td>
+                            <td>{l.accuracy?.toFixed(1)}%</td>
+                            <td style={{ color: l.delta_accuracy > 0 ? '#22c55e' : l.delta_accuracy < 0 ? '#ef4444' : '#94a3b8', fontWeight: 600 }}>
+                              {l.delta_accuracy > 0 ? '+' : ''}{l.delta_accuracy?.toFixed(1)}%
+                            </td>
+                            <td>{l.brier?.toFixed(4)}</td>
+                            <td style={{ color: l.delta_brier < 0 ? '#22c55e' : l.delta_brier > 0 ? '#ef4444' : '#94a3b8', fontWeight: 600 }}>
+                              {l.delta_brier > 0 ? '+' : ''}{l.delta_brier?.toFixed(4)}
+                            </td>
+                            <td style={{ color: '#22c55e' }}>{l.correct}</td>
+                            <td style={{ color: '#ef4444' }}>{l.wrong}</td>
+                            <td style={{ color: errorRate > 55 ? '#ef4444' : errorRate < 45 ? '#22c55e' : '#94a3b8' }}>
+                              {errorRate}%
+                            </td>
+                            <td>{l.promoted ? '✅' : '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* Propostas de Apostas */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h4>🎯 Propostas de Apostas — Acurácia por Tipo</h4>
+                    <p className="muted small">
+                      Análise de acerto das propostas geradas pelo modelo em cada tipo de aposta.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="hist-stats" style={{ marginTop: 12 }}>
+                  {Object.entries(btSummary.proposals_summary || {}).map(([type, data]) => (
+                    <Stat key={type}
+                          label={type}
+                          value={data.total > 0 ? `${data.accuracy}% (${data.correct}/${data.total})` : 'sem dados'}
+                          ok={data.accuracy > 55}
+                          bad={data.accuracy < 45 && data.total > 10} />
+                  ))}
+                </div>
+
+                <div className="table-scroll" style={{ marginTop: 14 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr>
+                        <th>Tipo</th>
+                        <th>Total</th>
+                        <th>Acertos</th>
+                        <th>Erros</th>
+                        <th>Acurácia</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(btSummary.proposals_summary || {}).map(([type, data]) => {
+                        const status = data.accuracy >= 55 ? '🟢 Lucrativo' : data.accuracy >= 45 ? '🟡 Neutro' : '🔴 Prejuízo'
+                        return (
+                          <tr key={type}>
+                            <td><b>{type}</b></td>
+                            <td>{data.total}</td>
+                            <td style={{ color: '#22c55e' }}>{data.correct}</td>
+                            <td style={{ color: '#ef4444' }}>{data.total - data.correct}</td>
+                            <td style={{ fontWeight: 600, color: data.accuracy > 55 ? '#22c55e' : data.accuracy < 45 ? '#ef4444' : '#94a3b8' }}>
+                              {data.accuracy}%
+                            </td>
+                            <td>{status}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* Análise de Erros por Liga */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h4>❌ Análise de Erros por Resultado</h4>
+                    <p className="muted small">
+                      Distribuição dos erros: quando o modelo erra, qual resultado real aparece mais?
+                    </p>
+                  </div>
+                </div>
+
+                <div className="table-scroll" style={{ marginTop: 12 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr>
+                        <th>Liga</th>
+                        <th>Total</th>
+                        <th>Erros</th>
+                        <th>% Erro</th>
+                        <th>Erros → Casa vence</th>
+                        <th>Erros → Empate</th>
+                        <th>Erros → Fora vence</th>
+                        <th>Confiança Alta (certo)</th>
+                        <th>Confiança Alta (errado)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {btSummary.leagues.filter(l => l.wrong > 0).map((l, i) => {
+                        const err = l.error_analysis || {}
+                        const bins = err.confidence_bins || {}
+                        const highAcc = bins.high_correct || 0
+                        const highWrong = bins.high_wrong || 0
+                        return (
+                          <tr key={i}>
+                            <td><b>{l.league_name}</b></td>
+                            <td>{l.total}</td>
+                            <td style={{ color: '#ef4444' }}>{l.wrong}</td>
+                            <td>{(l.wrong / l.total * 100).toFixed(1)}%</td>
+                            <td>{err.errors_by_result?.['1'] || 0}</td>
+                            <td>{err.errors_by_result?.['X'] || 0}</td>
+                            <td>{err.errors_by_result?.['2'] || 0}</td>
+                            <td style={{ color: '#22c55e' }}>{highAcc}</td>
+                            <td style={{ color: '#ef4444' }}>{highWrong}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          )}
+        </main>
+      )}
     </div>
   )
 }
@@ -1069,80 +1552,14 @@ function LineChart({ data, title, xLabel, yLabel }) {
   )
 }
 
-function NeuralNet({ learn, cal }) {
-  const running = cal?.running || false
-  const total = learn?.calibrated?.length || 0
-  const acc = total ? learn.calibrated.reduce((s, m) => s + (m.accuracy || 0), 0) / total : 0
-  const grid = learn?.grid?.home_advantage?.length || 7
-  const listen = Math.max(3, Math.min(8, Math.round(total / 6)))
-  const layers = [grid, Math.max(8, Math.min(16, Math.round(total / 4))), listen, 3]
-  const xs = [60, 165, 270, 330]
-  const cols = ['#22d3ee', '#4ade80', '#fbbf24', '#a78bfa']
-  const ys = []
-  layers.forEach((n, li) => {
-    const arr = []
-    for (let i = 0; i < n; i++) arr.push(40 + (220 / (n - 1 || 1)) * i)
-    ys.push(arr)
-  })
-  const edges = []
-  for (let l = 0; l < 3; l++) {
-    ys[l].forEach((a, i) => {
-      ys[l + 1].forEach((b, j) => {
-        edges.push({ x1: xs[l], y1: a, x2: xs[l + 1], y2: b, k: (i + j) % 5 })
-      })
-    })
-  }
-  const nodes = []
-  for (let l = 0; l < 4; l++) {
-    ys[l].forEach((y, i) => {
-      const active = running || (l === 0 ? i < grid : l === 1 ? i < Math.ceil(total / 4) : l === 2 ? i < listen : i < 2)
-      nodes.push({ x: xs[l], y, l, active })
-    })
-  }
-  return (
-    <div className="neural-wrap">
-      <svg viewBox="0 0 380 300" className="neural">
-        <defs>
-          <linearGradient id="ng" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stopColor="#22d3ee" />
-            <stop offset="1" stopColor="#a78bfa" />
-          </linearGradient>
-        </defs>
-        <rect x="0" y="0" width="380" height="300" rx="14" fill="rgba(8,10,24,.6)" stroke="rgba(148,163,184,.18)" />
-        {edges.map((e, i) => (
-          <line key={i} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2}
-                stroke={cols[e.k % 3]} strokeOpacity={running ? 0.25 : 0.12} strokeWidth="1"
-                className={running ? 'nn-edge' : ''} style={{ animationDelay: `${(e.k * 0.15).toFixed(2)}s` }} />
-        ))}
-        {nodes.map((n, i) => (
-          <g key={i}>
-            <circle cx={n.x} cy={n.y} r="7" fill={cols[n.l]} className={n.active && running ? 'nn-node' : ''}
-                    style={n.active && running ? { animationDelay: `${(n.y * 0.01).toFixed(2)}s` } : {}} />
-            <circle cx={n.x} cy={n.y} r="7" fill="none" stroke={cols[n.l]}
-                    strokeOpacity={n.active ? 0.9 : 0.28} strokeWidth="1.5" />
-          </g>
-        ))}
-        <text x="60" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">entrada</text>
-        <text x="165" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">oculta</text>
-        <text x="270" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">escuta</text>
-        <text x="330" y="292" textAnchor="middle" fill="#94a3b8" fontSize="11">saída</text>
-      </svg>
-      <div className="neural-meta">
-        <span className="neural-dot" style={{ background: '#4ade80' }}></span>
-        <span className="muted small">{total} ligas calibradas</span>
-        <span className="neural-dot" style={{ background: '#22d3ee' }}></span>
-        <span className="muted small">acurácia média {acc.toFixed(1)}%</span>
-        <span className="neural-dot" style={{ background: running ? '#fbbf24' : '#64748b' }}></span>
-        <span className="muted small">{running ? `aprendendo ${cal.done}/${cal.total}...` : 'em repouso'}</span>
-      </div>
-    </div>
-  )
-}
-
 function PredictionView({ p, token, onSave }) {
   const { match, lambdas, probs, top_scores, proposals, compare, model } = p
   const [picked, setPicked] = useState(null)
   const [chestOpen, setChestOpen] = useState(false)
+  const [risk, setRisk] = useState(null)
+  const [riskLoading, setRiskLoading] = useState(false)
+  const [riskKelly, setRiskKelly] = useState(0.25)
+  const [riskBankroll, setRiskBankroll] = useState(1000)
 
   const pickOptions = useMemo(() => {
     const opts = []
@@ -1163,7 +1580,16 @@ function PredictionView({ p, token, onSave }) {
     return opts
   }, [probs, top_scores, match])
 
-  useEffect(() => { setPicked(null) }, [p])
+  useEffect(() => { setPicked(null); setRisk(null) }, [p])
+
+  async function loadRisk() {
+    if (!match.id) { alert('Previsão de confronto arbitrário — sem match_id para risco'); return }
+    setRiskLoading(true)
+    try {
+      setRisk(await api.riskMatch(match.id, token, { kelly_fraction: riskKelly, bankroll: riskBankroll }))
+    } catch (e) { /* risco é opcional */ }
+    setRiskLoading(false)
+  }
 
   function save() {
     if (!picked) { alert('Escolha uma jogada para salvar'); return }
@@ -1202,6 +1628,106 @@ function PredictionView({ p, token, onSave }) {
           🧠 modelo {match.league}: {model.feature || 'xg'} · HA {Number(model.home_advantage).toFixed(2)} · janela {model.window}
           {model.accuracy != null && <> · acurácia {Number(model.accuracy).toFixed(1)}%</>}
           {model.brier != null && <> · Brier {Number(model.brier).toFixed(3)}</>}
+        </div>
+      )}
+
+      {/* FASE 11 — Risk Engine Panel */}
+      {match.id && (
+        <div className="risk-panel">
+          <div className="risk-header">
+            <h4>🛡️ Gestão de Risco</h4>
+            <div className="risk-controls">
+              <label>
+                Kelly
+                <select value={riskKelly} onChange={e => setRiskKelly(Number(e.target.value))}>
+                  <option value={0.125}>1/8 Kelly</option>
+                  <option value={0.25}>1/4 Kelly</option>
+                  <option value={0.5}>1/2 Kelly</option>
+                  <option value={0.75}>3/4 Kelly</option>
+                  <option value={1}>Full Kelly</option>
+                </select>
+              </label>
+              <label>
+                Banca
+                <input type="number" value={riskBankroll} min={100} step={100}
+                       onChange={e => setRiskBankroll(Number(e.target.value))}
+                       style={{ width: 80 }} />
+              </label>
+              <button className="btn-small" onClick={loadRisk} disabled={riskLoading}>
+                {riskLoading ? 'Calculando...' : '📊 Calcular risco'}
+              </button>
+            </div>
+          </div>
+
+          {risk && (
+            <div className="risk-body">
+              <div className="hist-stats">
+                <Stat label="Sinais" value={risk.summary.total_signals} ok={risk.summary.any_value} />
+                <Stat label="Stake sugerida" value={`${risk.summary.total_stake_suggested} u`} />
+                <Stat label="Exposição" value={`${risk.summary.total_exposure_pct}%`} />
+                <Stat label="Vig" value={`${(risk.market.vig * 100).toFixed(1)}%`} />
+              </div>
+
+              {risk.signals.length > 0 && (
+                <div className="table-scroll" style={{ marginTop: 10 }}>
+                  <table className="runs">
+                    <thead>
+                      <tr>
+                        <th>Jogada</th>
+                        <th>Prob.</th>
+                        <th>Odd justa</th>
+                        <th>Odd mercado</th>
+                        <th>Edge</th>
+                        <th>Kelly</th>
+                        <th>Stake</th>
+                        <th>Score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {risk.signals.map((s, i) => (
+                        <tr key={i}>
+                          <td><b>{s.label}</b></td>
+                          <td>{(s.prob * 100).toFixed(1)}%</td>
+                          <td>@{s.fair_odds}</td>
+                          <td>@{s.market_odds}</td>
+                          <td style={{ color: s.edge > 0 ? '#34d399' : '#f87171' }}>
+                            {s.edge > 0 ? '+' : ''}{(s.edge * 100).toFixed(1)}%
+                          </td>
+                          <td>{(s.kelly_adjusted * 100).toFixed(2)}%</td>
+                          <td>{s.stake_suggested} u</td>
+                          <td>
+                            <span className={`badge risk-${s.risk_score.grade.toLowerCase()}`}>
+                              {s.risk_score.grade} · {s.risk_score.score}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {risk.signals.length === 0 && (
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  Nenhum value bet encontrado com os critérios atuais.
+                  Ajuste Kelly/banca ou espere por jogos com edge positivo.
+                </p>
+              )}
+
+              <p className="muted small" style={{ marginTop: 8 }}>
+                ⚠️ Kelly fracionado: {risk.config.kelly_label} ·
+                Max stake: {risk.config.max_stake} u ·
+                Max exposição/jogo: {risk.config.max_exposure_per_match} u ·
+                Max diário: {risk.config.max_daily_exposure} u
+              </p>
+            </div>
+          )}
+
+          {!risk && !riskLoading && (
+            <p className="muted small" style={{ marginTop: 6 }}>
+              Clique em "Calcular risco" para ver Kelly fracionado, limites e score de confiança.
+            </p>
+          )}
         </div>
       )}
 

@@ -193,12 +193,12 @@ def phase_e2e(token):
                     "return Array.from(document.querySelectorAll('.bar-val')).map(e => e.textContent)")
                 check("painel de previsão renderiza probabilidades", len(bars) >= 3, f"{len(bars)} barras")
 
-        # navegar pelas 5 abas sem quebrar
+        # navegar pelas 6 abas sem quebrar (Confronto..Sofascore + Evolução)
         buttons = d.find_elements(By.CSS_SELECTOR, "header nav button")
         for b in buttons:
             b.click()
             time.sleep(1)
-        check("navegação nas 5 abas", len(buttons) == 5)
+        check("navegação nas 6 abas", len(buttons) == 6)
 
         # console sem erros severos (ignora favicon 404)
         severe = [l["message"][:120] for l in d.get_log("browser")

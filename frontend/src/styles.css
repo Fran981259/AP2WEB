@@ -287,24 +287,6 @@ tbody tr:hover { background: rgba(99,102,241,.05); }
   background: rgba(45,212,191,.08); border: 1px solid rgba(45,212,191,.28);
   border-radius: 20px; font-size: 11.5px; color: var(--accent2); font-weight: 550;
 }
-.neural-wrap { margin: 12px 0 4px; }
-.neural { width: 100%; max-width: 520px; height: auto; display: block; margin: 0 auto; }
-.neural-meta {
-  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  justify-content: center; margin-top: 6px;
-}
-.neural-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-@keyframes nn-pulse {
-  0% { opacity: .25; transform-origin: center; }
-  50% { opacity: 1; }
-  100% { opacity: .25; }
-}
-.nn-node { animation: nn-pulse 1.4s ease-in-out infinite; }
-@keyframes nn-flow {
-  0% { stroke-dashoffset: 60; }
-  100% { stroke-dashoffset: 0; }
-}
-.nn-edge { stroke-dasharray: 5 8; animation: nn-flow 1.6s linear infinite; }
 .chart-card { margin-top: 12px; }
 .chart-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
 .line-chart { width: 100%; max-width: 620px; height: auto; display: block; }
@@ -500,6 +482,50 @@ label.inline select:focus { outline: none; border-color: var(--accent); }
   background: linear-gradient(90deg, var(--accent), var(--accent2));
   transition: width .35s ease;
 }
+
+/* ---------- FASE 11 — Risk Engine ---------- */
+.risk-panel {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-top: 12px;
+}
+.risk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.risk-header h4 { margin: 0; font-size: 14px; }
+.risk-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.risk-controls label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.risk-controls select,
+.risk-controls input {
+  background: var(--panel3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.risk-body { margin-top: 10px; }
+.badge.risk-a { background: rgba(52,211,153,.15); color: #34d399; border: 1px solid rgba(52,211,153,.3); }
+.badge.risk-b { background: rgba(99,102,241,.15); color: #818cf8; border: 1px solid rgba(99,102,241,.3); }
+.badge.risk-c { background: rgba(251,191,36,.15); color: #fbbf24; border: 1px solid rgba(251,191,36,.3); }
+.badge.risk-d { background: rgba(248,113,113,.15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
 
 /* ---------- misc ---------- */
 .error { color: var(--danger); font-size: 13px; margin-bottom: 10px; }

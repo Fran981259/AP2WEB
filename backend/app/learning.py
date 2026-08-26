@@ -1,15 +1,19 @@
-"""Aprendizado e calibração do motor Poisson (fonte: Sofascore).
+"""Aprendizado e calibração do motor Poisson + Dixon-Coles (fonte: Sofascore).
 
-Cada liga tem um "fator de mando" (home_advantage), uma janela deslizante e a
-feature usada (xG ou gols reais) ótimos, aprendidos via BACKTEST HONESTO —
-para prever o jogo N, usamos apenas os jogos 1..N-1 (sem vazamento de dados).
+Cada liga tem:
+  - home_advantage: fator de mando calibrado
+  - window: janela deslizante ótima
+  - feature: xG, gols ou blend
+  - rho: parâmetro de dependência Dixon-Coles (0 = Poisson puro)
+
+Calibração via BACKTEST HONESTO — para prever o jogo N, usamos apenas
+os jogos 1..N-1 (sem vazamento de dados). Grid search otimiza Brier score
+sobre (feature × window × home_advantage × rho).
 
 Métricas:
-  - Acurácia 1X2: % de jogos onde o favorito (maior prob.) acertou o resultado.
-  - Brier score: erro quadrático médio entre probs 1X2 e resultado real
-    (0 = perfeito, menor é melhor). Penaliza excesso de confiança.
-
-Dependência: Feature Engine — única fonte de features (gf, ga, xg, xga, window, blend).
+  - Acurácia 1X2: % de jogos onde o favorito acertou o resultado.
+  - Brier score: erro quadrático médio (0 = perfeito).
+  - Log Loss: penalização por confiança incorreta.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from .model import MatchInput, TeamInput, predict as run_predict
 
 HOME_ADVANTAGE_GRID = [1.05, 1.10, 1.15, 1.20, 1.25, 1.30]
 WINDOW_GRID = [5, 10, 15]
+RHO_GRID = [0.0, -0.05, -0.10, -0.13, -0.15, -0.20]  # Dixon-Coles param
 
 MIN_SAMPLES = 20  # mínimo de previsões por liga para calibrar
 FEATURE_GRID = ["xg", "goals", "blend"]  # features disponíveis para calibração
@@ -42,20 +47,25 @@ def _team_lambdas(history: deque, window: int, feature: str) -> dict:
     return compute_team_stats(history, window, feature)
 
 
-def _predict_probs(home_lambdas: dict, away_lambdas: dict, home_adv: float) -> dict:
+def _predict_probs(home_lambdas: dict, away_lambdas: dict,
+                   home_adv: float, rho: float = 0.0) -> dict:
+    """Previsão 1X2 via Poisson com Dixon-Coles."""
     mi = MatchInput(
-        home=TeamInput(name="h", gf_avg=home_lambdas.get("gf_avg", 0), ga_avg=home_lambdas.get("ga_avg", 0)),
-        away=TeamInput(name="a", gf_avg=away_lambdas.get("gf_avg", 0), ga_avg=away_lambdas.get("ga_avg", 0)),
+        home=TeamInput(name="h", gf_avg=home_lambdas.get("gf_avg", 0),
+                       ga_avg=home_lambdas.get("ga_avg", 0)),
+        away=TeamInput(name="a", gf_avg=away_lambdas.get("gf_avg", 0),
+                       ga_avg=away_lambdas.get("ga_avg", 0)),
     )
-    return run_predict(mi, home_advantage=home_adv).probs["1x2"]
+    return run_predict(mi, home_advantage=home_adv, rho=rho).probs["1x2"]
 
 
 def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
-                    feature: str = "xg") -> dict:
+                    feature: str = "xg", rho: float = 0.0) -> dict:
     """Backtest honesto: prevê cada jogo usando apenas os jogos anteriores.
 
     feature: 'xg' → usa xG marcado/sofrido; 'goals' → gols reais;
              'blend' → média simples dos dois (50% gols + 50% xG).
+    rho: parâmetro Dixon-Coles (0 = Poisson puro, tipicamente ≈ -0.13).
     Retorna também `series`: curva de aprendizado real — acurácia acumulada
     a cada previsão (como o motor melhora conforme vê mais jogos).
     """
@@ -84,7 +94,7 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
         if hh is not None and ah is not None and len(hh) > 0 and len(ah) > 0:
             home_l = _team_lambdas(hh, window, feature)
             away_l = _team_lambdas(ah, window, feature)
-            p = _predict_probs(home_l, away_l, home_adv)
+            p = _predict_probs(home_l, away_l, home_adv, rho)
             actual = "1" if m["score_home"] > m["score_away"] else (
                 "X" if m["score_home"] == m["score_away"] else "2")
             fav = max(p, key=p.get)
@@ -126,38 +136,65 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
 
 
 def calibrate_league(league_id: int) -> dict | None:
-    """Procura a combinação (feature, home_advantage, window) com melhor Brier/accuracy."""
+    """Procura a combinação (feature, window, ha, rho) com melhor Brier.
+
+    Grid: 3 features × 3 windows × 6 ha × 6 rho = 324 combos por liga.
+    Seleção por Brier score (menor = melhor), desempate por accuracy.
+    """
     best = None
     for feature in FEATURE_GRID:
         for window in WINDOW_GRID:
             for ha in HOME_ADVANTAGE_GRID:
-                res = backtest_league(league_id, ha, window, feature)
-                if res["total"] < MIN_SAMPLES:
-                    continue
-                key = (res["brier"], -res["accuracy"])
-                if best is None or key < best["key"]:
-                    best = {"key": key, "ha": ha, "window": window,
-                            "feature": feature, **res}
+                for rho in RHO_GRID:
+                    res = backtest_league(league_id, ha, window, feature, rho)
+                    if res["total"] < MIN_SAMPLES:
+                        continue
+                    key = (res["brier"], -res["accuracy"])
+                    if best is None or key < best["key"]:
+                        best = {"key": key, "ha": ha, "window": window,
+                                "feature": feature, "rho": rho, **res}
     if not best:
         return None
+
+    rho_val = best.get("rho", 0.0)
+
+    # Atualizar schema: adicionar coluna rho se não existir
+    _ensure_rho_column()
+
     db.run_exec(
-        "INSERT INTO league_models(league_id,home_advantage,window,feature,accuracy,brier,"
-        "sample_count,calibrated_at) VALUES(?,?,?,?,?,?,?,datetime('now')) "
+        "INSERT INTO league_models(league_id,home_advantage,window,feature,rho,accuracy,brier,"
+        "sample_count,calibrated_at) VALUES(?,?,?,?,?,?,?,?,datetime('now')) "
         "ON CONFLICT(league_id) DO UPDATE SET "
         "home_advantage=excluded.home_advantage, window=excluded.window, "
-        "feature=excluded.feature, accuracy=excluded.accuracy, brier=excluded.brier, "
+        "feature=excluded.feature, rho=excluded.rho, "
+        "accuracy=excluded.accuracy, brier=excluded.brier, "
         "sample_count=excluded.sample_count, calibrated_at=excluded.calibrated_at",
         (league_id, best["ha"], best["window"], best["feature"],
-         best["accuracy"], best["brier"], best["total"]))
+         rho_val, best["accuracy"], best["brier"], best["total"]))
     return {
         "league_id": league_id,
         "home_advantage": best["ha"],
         "window": best["window"],
         "feature": best["feature"],
+        "rho": rho_val,
         "accuracy": best["accuracy"],
         "brier": best["brier"],
         "samples": best["total"],
     }
+
+
+def _ensure_rho_column() -> None:
+    """Adiciona coluna rho à tabela league_models se não existir (migração leve)."""
+    try:
+        if db.MODE == "sqlite":
+            cols = [r[1] for r in db.run_query("PRAGMA table_info(league_models)")]
+            if "rho" not in cols:
+                db.run_exec("ALTER TABLE league_models ADD COLUMN rho REAL DEFAULT 0.0")
+        else:
+            db.run_exec(
+                "ALTER TABLE league_models ADD COLUMN IF NOT EXISTS rho REAL DEFAULT 0.0")
+    except Exception:
+        pass  # coluna já existe ou outro erro tolerável
 
 
 def calibrate_all() -> dict:
@@ -183,16 +220,17 @@ def calibrate_all() -> dict:
 
 
 def get_model(league_id: int) -> dict:
-    """Parâmetros calibrados da liga (fallback para xg/1.15/10 sem calibração)."""
+    """Parâmetros calibrados da liga (fallback para xg/1.15/10/rho=0 sem calibração)."""
     rows = db.run_query("SELECT * FROM league_models WHERE league_id=?", (league_id,))
     if not rows:
         return {"league_id": league_id, "home_advantage": 1.15, "window": 10,
-                "feature": "xg", "accuracy": None, "brier": None,
+                "feature": "xg", "rho": 0.0, "accuracy": None, "brier": None,
                 "sample_count": 0, "calibrated_at": None}
     d = dict(rows[0])
     d["home_advantage"] = float(d.get("home_advantage") or 1.15)
     d["window"] = int(d.get("window") or 10)
     d["feature"] = d.get("feature") or "xg"
+    d["rho"] = float(d.get("rho") or 0.0)
     return d
 
 
@@ -206,7 +244,7 @@ def model_status() -> dict:
         "calibrated": [dict(r) for r in rows],
         "calibrated_count": len(rows),
         "grid": {"home_advantage": HOME_ADVANTAGE_GRID, "window": WINDOW_GRID,
-                 "feature": FEATURE_GRID},
+                 "feature": FEATURE_GRID, "rho": RHO_GRID},
         "min_samples": MIN_SAMPLES,
     }
 
@@ -227,7 +265,7 @@ def motor_curve(buckets: int = 20) -> dict:
     for lg in leagues:
         model = get_model(lg["id"])
         r = backtest_league(lg["id"], model["home_advantage"], model["window"],
-                            model["feature"])
+                            model["feature"], model.get("rho", 0.0))
         if not r["series"]:
             continue
         # reamostra a série da liga para `buckets` pontos (por % de temporada)
@@ -324,7 +362,8 @@ def calibration_status() -> dict:
                  "started_at", "finished_at")}
 
 def walkforward_validation(league_id: int, window: int = 10,
-                          home_advantage: float = 1.15) -> dict:
+                          home_advantage: float = 1.15,
+                          rho: float = 0.0) -> dict:
     """Validação walk-forward: treina com dados do passado, testa com o futuro.
 
     REUTILIZA o motor do backtest_league (ML Skill v1.1 §20.1: proibido
@@ -334,7 +373,7 @@ def walkforward_validation(league_id: int, window: int = 10,
 
     Mantém o contrato de resposta (accuracy, brier, series, n_folds).
     """
-    bt = backtest_league(league_id, home_adv=home_advantage, window=window)
+    bt = backtest_league(league_id, home_adv=home_advantage, window=window, rho=rho)
     return {
         "accuracy": bt["accuracy"],
         "brier": bt["brier"],

@@ -18,3 +18,8 @@ frontend/dist/
 
 # Ambiente
 .env
+
+# Dados de execução (backtest, evolution, meta-learner)
+backend/app/data/*.json
+backend/app/data/*.jsonl
+backend/app/data/sofascore/

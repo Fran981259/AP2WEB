@@ -52,5 +52,38 @@ export const api = {
   sofascoreData(leagueId, token) {
     const qs = leagueId ? `?league_id=${leagueId}` : ''
     return this.request(`/sofascore/data${qs}`, { token })
-  }
+  },
+  evolutionSnapshot(token) { return this.request('/evolution/snapshot', { token }) },
+  evolutionHistory(limit = 50, token) {
+    return this.request(`/evolution/history?limit=${limit}`, { token })
+  },
+  // Backtest Engine
+  backtestStart(intervalHours = 6, token) {
+    return this.request(`/backtest/start?interval_hours=${intervalHours}`, { method: 'POST', body: {}, token })
+  },
+  backtestStop(token) { return this.request('/backtest/stop', { method: 'POST', body: {}, token }) },
+  backtestStatus(token) { return this.request('/backtest/status', { token }) },
+  backtestRun(leagueIds = null, token) {
+    return this.request('/backtest/run', {
+      method: 'POST', token,
+      body: leagueIds || []
+    })
+  },
+  backtestCV(leagueId, nFolds = 5, token) {
+    return this.request(`/backtest/cv/${leagueId}?n_folds=${nFolds}`, { token })
+  },
+  backtestHistory(limit = 20, token) {
+    return this.request(`/backtest/history?limit=${limit}`, { token })
+  },
+  backtestMeta(token) { return this.request('/backtest/meta', { token }) },
+  backtestSummary(token) { return this.request('/backtest/summary', { token }) },
+  // FASE 11 — Risk Engine
+  riskMatch(matchId, token, params = {}) {
+    const qs = new URLSearchParams(params).toString()
+    return this.request(`/risk/${matchId}${qs ? '?' + qs : ''}`, { token })
+  },
+  riskLeague(leagueId, token, params = {}) {
+    const qs = new URLSearchParams(params).toString()
+    return this.request(`/risk/league/${leagueId}${qs ? '?' + qs : ''}`, { token })
+  },
 }
