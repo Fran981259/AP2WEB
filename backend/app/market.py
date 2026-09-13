@@ -10,7 +10,6 @@ consistente). Odds derivadas são determinísticas da fair_odds.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from . import db
@@ -79,7 +78,7 @@ def market_league(league_id: int, limit: int = 20,
                   vig: float = DEFAULT_VIG) -> list[dict[str, Any]]:
     """Fair + market odds + EV para os próximos jogos de uma liga."""
     q = ("SELECT m.id FROM matches m "
-         "WHERE m.league_id=? AND m.status='fixture' AND m.home_team_id IS NOT NULL "
+          "WHERE m.league_id=? AND m.status='scheduled' AND m.home_team_id IS NOT NULL "
          "ORDER BY m.kickoff_datetime, m.id LIMIT ?")
     rows = db.run_query(q, (league_id, limit))
     return [market_for_match(r["id"], as_of, vig) for r in rows]

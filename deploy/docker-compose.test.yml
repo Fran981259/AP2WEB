@@ -1,0 +1,102 @@
+name: ap2web-test
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      AP2WEB_ENV: development
+      AP2WEB_SECRET: ap2web-docker-test-secret-do-not-use-in-production-0123456789
+      AP2WEB_ORIGINS: http://localhost:5173
+      AP2WEB_COOKIE_SECURE: "false"
+      AP2WEB_ENFORCE_ROLES: "true"
+      AP2WEB_ENABLE_WORKER: "false"
+      AP2WEB_RATE_LIMIT_STORAGE: redis
+      AP2WEB_REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://ap2web:ap2web@postgres:5432/ap2web
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/ready', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [ap2web]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.app.worker"]
+    environment:
+      AP2WEB_ENV: development
+      AP2WEB_SECRET: ap2web-docker-test-secret-do-not-use-in-production-0123456789
+      AP2WEB_ENFORCE_ROLES: "true"
+      AP2WEB_RATE_LIMIT_STORAGE: redis
+      AP2WEB_REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://ap2web:ap2web@postgres:5432/ap2web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from backend.app.jobs import worker_healthy; raise SystemExit(0 if worker_healthy(30) else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks: [ap2web]
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [ap2web]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ap2web
+      POSTGRES_USER: ap2web
+      POSTGRES_PASSWORD: ap2web
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ap2web -d ap2web"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ap2web]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [ap2web]
+
+volumes:
+  postgres_test_data:
+  redis_test_data:
+
+networks:
+  ap2web:
+    driver: bridge

@@ -42,8 +42,7 @@ def _snapshot(skip_regression: bool = False) -> dict:
     skip_regression: pula a suíte selenium (lenta); usado pelo endpoint da UI.
     """
     sys.path.insert(0, "backend")
-    from app import db, learning
-    from app.xgb_engine import compare_models
+    from app import learning
 
     snap = {
         "timestamp": datetime.now(timezone.utc).isoformat(),

@@ -1,194 +1,83 @@
-"""Feature Engine — única fonte de features para o AP2WEB.
+"""Canonical feature selection and aggregation.
 
-Conforme BASE.md §1048-1070: deve existir uma única fonte para:
-  gf, ga, xg, xga, window, blend
-
-Utilizada por:
-  - backtest (learning.py)
-  - prediction (prediction.py)
-
-Princípio: same data → same features → reproducible results.
+compute_match_stats selects goals/xG/blend ONCE. compute_team_stats aggregates
+already selected gf/ga entries, newest first. Missing xG falls back to goals;
+zero is an observation, not missing data.
 """
-
 from __future__ import annotations
-from collections import deque
+
+import math
 from functools import lru_cache
-from typing import Dict, Optional, Tuple
 
 
-def parse_stat_value(v) -> Optional[float]:
-    """Converte valor de stat em float. None se indisponível."""
-    if v is None or v == "" or v == "-":
+def parse_stat_value(value) -> float | None:
+    if value is None or value == "" or value == "-":
         return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip()
-    m = s.split("(")[-1].replace(")", "").replace("%", "").strip()
-    try:
-        return float(m)
-    except ValueError:
+    text = str(value).strip()
+    for candidate in (text.split("(")[-1].replace(")", "").replace("%", "").strip(), text):
         try:
-            return float(s)
+            number = float(candidate)
+            return number if math.isfinite(number) else None
         except ValueError:
-            return None
+            continue
+    return None
 
 
-def _compute_team_stats_inner(
-    history_tuple: tuple,
-    window: int,
-    feature: str,
-) -> dict:
-    """Computa gf_avg, ga_avg (e derivados) para um time usando os últimos `window` jogos.
+def compute_match_stats(match: dict, feature: str) -> dict:
+    """Select match features from home/away-oriented raw score and xG fields."""
+    if feature not in {"goals", "xg", "blend"}:
+        raise ValueError(f"Unknown feature: {feature}")
+    sh = float(match.get("score_home") or 0)
+    sa = float(match.get("score_away") or 0)
+    xh = parse_stat_value(match.get("xg_home"))
+    xa = parse_stat_value(match.get("xg_away"))
+    gf, ga = sh, sa
+    if feature == "xg":
+        gf, ga = xh if xh is not None else sh, xa if xa is not None else sa
+    elif feature == "blend":
+        gf = (sh + xh) / 2 if xh is not None else sh
+        ga = (sa + xa) / 2 if xa is not None else sa
+    return {"gf": round(gf, 3), "ga": round(ga, 3), "xg_home": xh, "xg_away": xa}
 
-    Parâmetros:
-      history: deque de {"gf": float, "ga": float} — gols marcados/sofridos por jogo
-      window: número de jogos para considerar (últimos N)
-      feature: "xg" → usa xG do banco; "goals" → usa gols reais; "blend" → média
 
-    Retorna:
-      {"gf_avg": float, "ga_avg": float, "xg_avg": float | None, "xga_avg": float | None}
-    """
-    n = 0
-    gf_sum, ga_sum = 0.0, 0.0
-    xg_sum, xga_sum = 0.0, 0.0
-
-    for h in history_tuple:
-        if n >= window:
-            break
-        # h é uma tupla (gf, ga, xg_home, xg_away) vindos do cache
-        gf = h[0] if h[0] is not None else 0.0
-        ga = h[1] if h[1] is not None else 0.0
-        xg_home = h[2]  # pode ser None
-        xg_away = h[3]  # pode ser None
-
-        if feature == "xg":
-            # Usar xG disponível; seNone, cair back para gols
-            if xg_home is not None:
-                gf = xg_home
-            if xg_away is not None:
-                ga = xg_away
-        elif feature == "blend":
-            # Média simples: 50% gols + 50% xG
-            gf_real = gf
-            gf_xg = xg_home if xg_home is not None else 0.0
-            ga_real = ga
-            ga_xg = xg_away if xg_away is not None else 0.0
-            gf = (gf_real + gf_xg) / 2
-            ga = (ga_real + ga_xg) / 2
-
-        # Acumular (usar gols reais se xG não disponível ou feature=xg)
-        gf_sum += gf
-        ga_sum += ga
-
-        # Tentar acumular xG também se houver
-        if xg_home is not None:
-            xg_sum += xg_home
-        if xg_away is not None:
-            xg_sum += xg_away
-
-        n += 1
-
-    count = max(n, 1)
-
-    result = {
-        "gf_avg": round(gf_sum / count, 3),
-        "ga_avg": round(ga_sum / count, 3),
-    }
-
-    # Adicionar xG médios se houver dados
-    if n > 0 and xg_sum > 0:
-        result["xg_avg"] = round(xg_sum / n, 3)
-    else:
-        result["xg_avg"] = None
-
-    if n > 0 and xg_sum > 0:  # simplificado - xG da away também
-        result["xga_avg"] = round(xg_sum / n, 3)  # placeholder - na prática seria soma dos xG contra
-    else:
-        result["xga_avg"] = None
-
-    return result
+def team_match_stats(match: dict, team_id: int, feature: str) -> dict:
+    """Project a raw match to the requested team's perspective, including xG."""
+    stats = compute_match_stats(match, feature)
+    if team_id == match["home_team_id"]:
+        return stats
+    if team_id != match["away_team_id"]:
+        raise ValueError("Team does not participate in match")
+    return {"gf": stats["ga"], "ga": stats["gf"],
+            "xg_home": stats["xg_away"], "xg_away": stats["xg_home"]}
 
 
 @lru_cache(maxsize=2048)
 def _cached_team_stats(history_tuple: tuple, window: int, feature: str) -> dict:
-    """Cache wrapper — evita recomputação para mesmos inputs."""
-    return _compute_team_stats_inner(history_tuple, window, feature)
-
-
-def compute_team_stats(
-    history: deque,
-    window: int,
-    feature: str,
-) -> dict:
-    """Computa gf_avg, ga_avg (e derivados) para um time usando os últimos `window` jogos.
-
-    Parâmetros:
-      history: deque de {"gf": float, "ga": float} — gols marcados/sofridos por jogo
-      window: número de jogos para considerar (últimos N)
-      feature: "xg" → usa xG do banco; "goals" → usa gols reais; "blend" → média
-
-    Retorna:
-      {"gf_avg": float, "ga_avg": float, "xg_avg": float | None, "xga_avg": float | None}
-    """
-    history_tuple = tuple(
-        (h.get("gf"), h.get("ga"), h.get("xg_home"), h.get("xg_away"))
-        for h in history
-    )
-    return _cached_team_stats(history_tuple, window, feature)
-
-
-def compute_match_stats(
-    match: dict,
-    feature: str,
-) -> dict:
-    """Computa stats de uma partida isolada para display/debug.
-
-    Parâmetros:
-      match: dicionário com chaves: score_home, score_away, xg_home, xg_away
-      feature: "xg", "goals", ou "blend"
-
-    Retorna:
-      dict com gf, ga, e os valores feature-selected
-    """
-    score_home = match.get("score_home") or 0
-    score_away = match.get("score_away") or 0
-    xg_home = match.get("xg_home")
-    xg_away = match.get("xg_away")
-
-    if feature == "xg":
-        gf = xg_home if xg_home is not None else score_home
-        ga = xg_away if xg_away is not None else score_away
-    elif feature == "goals":
-        gf = score_home
-        ga = score_away
-    else:  # blend
-        gf = (score_home + (xg_home if xg_home is not None else 0)) / 2
-        ga = (score_away + (xg_away if xg_away is not None else 0)) / 2
-
+    rows = history_tuple[:window]
+    n = len(rows)
+    xg = [r[2] for r in rows if r[2] is not None]
+    xga = [r[3] for r in rows if r[3] is not None]
     return {
-        "gf": round(gf, 3),
-        "ga": round(ga, 3),
-        "xg_home": xg_home,
-        "xg_away": xg_away,
+        "gf_avg": round(sum(r[0] for r in rows) / n, 3) if n else 0.0,
+        "ga_avg": round(sum(r[1] for r in rows) / n, 3) if n else 0.0,
+        "xg_avg": round(sum(xg) / len(xg), 3) if xg else None,
+        "xga_avg": round(sum(xga) / len(xga), 3) if xga else None,
     }
 
 
-def blend_features(
-    goals_home: float,
-    goals_away: float,
-    xg_home: float,
-    xg_away: float,
-) -> Tuple[float, float, float, float]:
-    """Retorna (gf, ga, xg_contrib, xga_contrib) com blend 50/50.
+def compute_team_stats(history, window: int, feature: str) -> dict:
+    """Aggregate selected gf/ga; callers must select features before aggregation."""
+    if window < 1 or feature not in {"goals", "xg", "blend"}:
+        raise ValueError("Invalid window or feature")
+    rows = tuple((h["gf"], h["ga"], h.get("xg_home"), h.get("xg_away")) for h in history)
+    # Do not expose the mutable object stored in the cache to callers.
+    return dict(_cached_team_stats(rows, window, feature))
 
-    Conforme BASE.md: blend atual corresponde a 50% gols + 50% xG.
 
-    Returns:
-      gf: gols médios ponderados (50% gols + 50% xG home)
-      ga: gols médios ponderados (50% gols + 50% xG away)
-      xg_contrib: contribuição xG para casa
-      xga_contrib: contribuição xG para fora
-    """
-    gf = (goals_home + xg_home) / 2
-    ga = (goals_away + xg_away) / 2
-    return gf, ga, xg_home, xg_away
+def window_stats(matches: list[dict], team_id: int, window: int, feature: str) -> dict:
+    rows = [team_match_stats(m, team_id, feature) for m in matches
+            if team_id in (m["home_team_id"], m["away_team_id"])][:window]
+    if not rows:
+        return {"gf_avg": 1.2, "ga_avg": 1.2}
+    stats = compute_team_stats(rows, window, feature)
+    return {"gf_avg": stats["gf_avg"], "ga_avg": stats["ga_avg"]}

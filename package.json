@@ -1,0 +1,30 @@
+{
+  "name": "ap2web",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "exec bash scripts/dev.sh",
+    "dev:backend": "AP2WEB_ENV=development AP2WEB_SECRET=${AP2WEB_SECRET:-dev-secret-change-me-please-use-env-var-0123456789abcdef} AP2WEB_DB_PATH=${AP2WEB_DB_PATH:-/tmp/ap2web-dev.db} AP2WEB_ORIGINS=${AP2WEB_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173} AP2WEB_ENFORCE_ROLES=${AP2WEB_ENFORCE_ROLES:-false} AP2WEB_ENABLE_WORKER=${AP2WEB_ENABLE_WORKER:-false} backend/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000",
+    "dev:frontend": "npm --prefix frontend run dev -- --host 0.0.0.0 --port 5173",
+    "build:frontend": "npm --prefix frontend run build",
+    "build": "npm run build:frontend",
+    "lint": "backend/.venv/bin/ruff check backend/app",
+    "lint:frontend": "npm --prefix frontend run lint",
+    "format": "backend/.venv/bin/ruff format backend/app",
+    "typecheck": "backend/.venv/bin/mypy --follow-imports=skip backend/app/main.py backend/app/security.py backend/app/config.py backend/app/db.py backend/app/auth.py backend/app/jobs.py backend/app/ratelimit.py backend/app/worker.py",
+    "compile": "backend/.venv/bin/python -m compileall backend/app",
+    "test:unit": "backend/.venv/bin/python -m pytest tests/ -q",
+    "test:integration": "backend/.venv/bin/python tests/regression_suite.py --phase A",
+    "test:e2e": "backend/.venv/bin/python tests/regression_suite.py --phase B",
+    "test": "npm run compile && npm run test:unit",
+    "health": "curl --fail --silent --show-error http://127.0.0.1:8000/api/health",
+    "health:ready": "curl --fail --silent --show-error http://127.0.0.1:8000/api/ready",
+    "health:frontend": "curl --fail --silent --show-error http://127.0.0.1:5173",
+    "health:proxy": "curl --fail --silent --show-error http://127.0.0.1:5173/api/health",
+    "smoke": "backend/.venv/bin/python tests/test_smoke_local.py",
+    "worker": "backend/.venv/bin/python -m backend.app.worker",
+    "docker:build": "docker build -t ap2web:test .",
+    "migrate": "backend/.venv/bin/python backend/scripts/migrate_sqlite_to_pg.py --help"
+  }
+}

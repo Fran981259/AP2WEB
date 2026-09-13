@@ -10,8 +10,7 @@ Tudo determinístico — sem LLM, sem inventar números.
 """
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from typing import Any
 
 from . import db

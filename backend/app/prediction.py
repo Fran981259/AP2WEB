@@ -2,22 +2,93 @@
 
 Alimenta lambdas com as médias de xG (ou gols) marcados/sofridos dos últimos N
 jogos de cada time, usando a feature calibrada por liga (learning.get_model).
+
+Integração Bayesian (FASE 13): opcional via USE_BAYESIAN=true
+Substitui médias MLE por estimativas Gamma-Poisson posteriors.
 """
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
+from datetime import datetime, timezone
 from . import db
-from .feature_engine import compute_team_stats, compute_match_stats
+from .context_features import adjust_lambdas
+from .feature_engine import team_match_stats, window_stats
 from .learning import get_model
-from .model import MatchInput, TeamInput, predict as run_predict
+from .model import (
+    MatchInput, TeamInput, build_matrix, probabilities, top_scores,
+    proposals as build_proposals, predict as run_predict,
+)
+from .bayesian import (
+    BayesianEngine,
+    build_bayesian_engine_from_history, bayesian_lambda_blend
+)
+
+USE_BAYESIAN: bool = os.environ.get("USE_BAYESIAN", "false").lower() == "true"
+# Nota P3: global mantido por compatibilidade, mas comportamento determinístico deve usar
+# parâmetro explícito `use_bayesian` em _build/predict_* (request-scoped). Ver _should_use_bayesian.
+
+FEATURE_VERSION = "2.0_team_perspective_20260912"
+MODEL_CODE_VERSION = "poisson_v4_canonical_dc_20260912"
+
+_log = logging.getLogger("ap2web.prediction")
 
 
-def _window_values(match: dict, feature: str) -> tuple[float, float]:
-    """Retorna (marcados, sofridos) do jogo `match` na feature especificada.
-    
-    Agora delega ao Feature Engine para consistência unificada.
+def _kickoff_ts(kickoff: str | None) -> float | None:
+    """Converte kickoff_datetime em timestamp unix (UTC naive)."""
+    if not kickoff:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(kickoff.replace("Z", "+0000"), fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return datetime.strptime(kickoff[:10], "%Y-%m-%d").timestamp()
+    except ValueError:
+        return None
+
+
+def _context_flags(model: dict) -> dict:
+    return {
+        "rest": int(model.get("ctx_rest", 0) or 0),
+        "form": int(model.get("ctx_form", 0) or 0),
+        "team_ha": int(model.get("ctx_team_ha", 0) or 0),
+    }
+
+
+def _apply_context(context_flags: dict, lh: float, la: float,
+                   league_id: int, home_id: int, away_id: int,
+                   kickoff_ts: float | None, as_of: str | None,
+                   home_name: str, away_name: str,
+                   rho: float) -> dict | None:
+    """Aplica modificadores contextuais ao λ e reconstrói probabilidades.
+
+    Retorna None se nenhuma feature estiver habilitada. Sempre veracidade:
+    os fatores são limitados e o cálculo Poisson não é substituído (§7).
     """
-    gm = compute_match_stats(match, feature)
-    return gm["gf"], gm["ga"]
+    if not (context_flags["rest"] or context_flags["form"] or context_flags["team_ha"]):
+        return None
+    n_h, n_a = adjust_lambdas(
+        lh, la, league_id, home_id, away_id,
+        match_kickoff_ts=kickoff_ts,
+        use_rest=bool(context_flags["rest"]),
+        use_form=bool(context_flags["form"]),
+        use_team_ha=bool(context_flags["team_ha"]),
+        as_of=as_of,
+    )
+    if (n_h, n_a) == (lh, la):
+        return None
+    matrix = build_matrix(n_h, n_a, rho)
+    probs = probabilities(matrix)
+    return {
+        "lambdas": {"home": n_h, "away": n_a},
+        "probs": probs,
+        "top_scores": top_scores(probs["scores"]),
+        "proposals": build_proposals(probs, {"home": home_name, "away": away_name},
+                                     {"home": n_h, "away": n_a}),
+    }
 
 
 def _played_rows(cols: str, extra_where: str, params: list,
@@ -38,7 +109,7 @@ def _played_rows(cols: str, extra_where: str, params: list,
     )
     all_params = list(params)
     if as_of_timestamp:
-        query += "AND date(m.kickoff_datetime) < date(?) "
+        query += "AND datetime(m.kickoff_datetime) < datetime(?) "
         all_params.append(as_of_timestamp)
     query += "ORDER BY m.kickoff_datetime DESC LIMIT ?"
     all_params.append(limit)
@@ -57,27 +128,100 @@ def _avg_stats(league_id: int, team_id: int, window: int, feature: str,
         "m.score_home, m.score_away, m.xg_home, m.xg_away",
         "AND (m.home_team_id=? OR m.away_team_id=?)",
         [league_id, team_id, team_id], window, as_of_timestamp)
-    gfs, gas = [], []
-    for m in rows:
-        row_dict = dict(m)
-        # Construir dicionário de história para o Feature Engine
-        hist_entry = {
-            "gf": row_dict["score_home"] if row_dict["home_team_id"] == team_id else row_dict["score_away"],
-            "ga": row_dict["score_away"] if row_dict["home_team_id"] == team_id else row_dict["score_home"],
-            "xg_home": row_dict["xg_home"],
-            "xg_away": row_dict["xg_away"],
+    return window_stats([dict(r) for r in rows], team_id, window, feature)
+
+
+_BAYESIAN_ENGINES: dict[int, BayesianEngine] = {}
+_BAYESIAN_ENGINES_SNAPSHOT: dict[int, str] = {}  # league_id -> snapshot iso for cache key
+
+def invalidate_prediction_cache(league_id: int | None = None):
+    """Cache invalidation after sync/calibration/promotion (P5)."""
+    if league_id is None:
+        _BAYESIAN_ENGINES.clear()
+        _BAYESIAN_ENGINES_SNAPSHOT.clear()
+        try:
+            from .feature_engine import _cached_team_stats
+            _cached_team_stats.cache_clear()
+        except Exception:
+            pass
+        _log.info("cache invalidated all")
+    else:
+        _BAYESIAN_ENGINES.pop(league_id, None)
+        _BAYESIAN_ENGINES_SNAPSHOT.pop(league_id, None)
+        try:
+            from .feature_engine import _cached_team_stats
+            _cached_team_stats.cache_clear()
+        except Exception:
+            pass
+        _log.debug("cache invalidated league=%s", league_id)
+
+def _get_bayesian_engine(league_id: int) -> BayesianEngine:
+    if league_id not in _BAYESIAN_ENGINES:
+        matches = [dict(r) for r in db.run_query(
+            "SELECT m.kickoff_datetime, m.home_team_id, m.away_team_id, "
+            "       m.score_home, m.score_away, th.name AS home_name, ta.name AS away_name "
+            "FROM matches m "
+            "JOIN teams th ON th.id=m.home_team_id "
+            "JOIN teams ta ON ta.id=m.away_team_id "
+            "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL "
+            "ORDER BY m.kickoff_datetime",
+            (league_id,)
+        )]
+        _BAYESIAN_ENGINES[league_id] = build_bayesian_engine_from_history(matches)
+    return _BAYESIAN_ENGINES[league_id]
+
+
+def _avg_stats_bayesian(league_id: int, team_id: int, window: int,
+                        as_of_timestamp: str | None = None) -> dict:
+    """Posterior Gamma ACUMULADO sobre TODAS as partidas anteriores a `as_of`.
+
+    Semântica do experimento B/C da FASE 13 (scripts/bayesian_experiment.py):
+    o posterior cresce com todo o histórico já visto — não é limitado à janela.
+    Corrigido na auditoria: o engine é criado do zero com o prior e atualizado
+    apenas com as partidas anteriores a `as_of` (filtro temporal), eliminando
+    (1) a dupla contagem dos jogos recentes e (2) o vazamento de jogos futuros
+    que existia ao pré-carregar o engine com a liga inteira.
+
+    Posterior = Gamma(α0 + Σ gols, β0 + n). `games_observed` alimenta o peso
+    de credibilidade do método híbrido.
+    """
+    query = (
+        "SELECT m.kickoff_datetime, m.home_team_id, m.away_team_id, "
+        "m.score_home, m.score_away "
+        "FROM matches m "
+        "WHERE m.league_id=? AND (m.home_team_id=? OR m.away_team_id=?) "
+        "  AND m.status='played' AND m.score_home IS NOT NULL "
+    )
+    params = [league_id, team_id, team_id]
+    if as_of_timestamp:
+        query += " AND datetime(m.kickoff_datetime) < datetime(?) "
+        params.append(as_of_timestamp)
+    query += " ORDER BY m.kickoff_datetime, m.id"
+    rows = db.run_query(query, tuple(params))
+    n = len(rows)
+    if not rows:
+        return {"gf_avg": 1.3 / 5.0, "ga_avg": 1.3 / 5.0,
+                "bayesian_weight": 0.0, "games_observed": 0}
+
+    engine = BayesianEngine()
+    for r in rows:
+        r = dict(r)
+        home_side = r["home_team_id"] == team_id
+        gf = float(r["score_home"] if home_side else r["score_away"])
+        ga = float(r["score_away"] if home_side else r["score_home"])
+        engine.update_team(team_id, f"Team {team_id}", gf=gf, ga=ga)
+
+    state = engine.teams.get(team_id)
+    if state:
+        weight = min(n / 10.0, 1.0)
+        return {
+            "gf_avg": state.lambda_gf,
+            "ga_avg": state.lambda_ga,
+            "bayesian_weight": weight,
+            "games_observed": n,
         }
-        # Usar história simplificada - para produção usaria deque real
-        # Aqui delegamos compute_team_stats com dados da row
-        # Para simplicidade, calculamos média manualmente usando os valores da row
-        home_side = row_dict["home_team_id"] == team_id
-        gf, ga = _window_values(hist_entry, feature)  # usa história construida
-        gfs.append(gf)
-        gas.append(ga)
-    if not gfs:
-        return {"gf_avg": 1.2, "ga_avg": 1.2}
-    return {"gf_avg": round(sum(gfs) / len(gfs), 3),
-            "ga_avg": round(sum(gas) / len(gas), 3)}
+    return {"gf_avg": 1.3 / 5.0, "ga_avg": 1.3 / 5.0,
+            "bayesian_weight": 0.0, "games_observed": 0}
 
 
 def _avg_stats_detail(league_id: int, team_id: int, window: int, feature: str,
@@ -85,20 +229,15 @@ def _avg_stats_detail(league_id: int, team_id: int, window: int, feature: str,
     """Jogos brutos que alimentaram as médias (auditoria do confronto)."""
     rows = _played_rows(
         "m.kickoff_datetime, th.name AS home, ta.name AS away, "
-        "m.score_home, m.score_away, m.xg_home, m.xg_away, m.home_team_id",
+        "m.score_home, m.score_away, m.xg_home, m.xg_away, m.home_team_id, m.away_team_id",
         "AND (m.home_team_id=? OR m.away_team_id=?)",
         [league_id, team_id, team_id], window, as_of_timestamp)
     games = []
     for m in rows:
         row_dict = dict(m)
         home_side = row_dict["home_team_id"] == team_id
-        hist_entry = {
-            "gf": row_dict["score_home"] if home_side else row_dict["score_away"],
-            "ga": row_dict["score_away"] if home_side else row_dict["score_home"],
-            "xg_home": row_dict["xg_home"],
-            "xg_away": row_dict["xg_away"],
-        }
-        gf, ga = _window_values(hist_entry, feature)
+        selected = team_match_stats(row_dict, team_id, feature)
+        gf, ga = selected["gf"], selected["ga"]
         games.append({
             "date": m["kickoff_datetime"][:10] if m["kickoff_datetime"] else None,
             "opponent": m["away"] if home_side else m["home"],
@@ -159,7 +298,7 @@ def _team_card(league_id: int, team_id: int, name: str, stats: dict, feature: st
     )
     params = [league_id, team_id, team_id]
     if as_of_timestamp:
-        query += " AND date(kickoff_datetime) < date(?)"
+        query += " AND datetime(kickoff_datetime) < datetime(?)"
         params.append(as_of_timestamp)
     gp = db.run_query(query, tuple(params))[0]["c"] or 0
     return {
@@ -182,9 +321,18 @@ def _compare(league_id: int, home_id: int, away_id: int,
     }
 
 
+def _should_use_bayesian(model_method: str, use_bayesian: bool | None) -> bool:
+    """Determinístico por request: se use_bayesian explícito, usa-o; senão cai no método da liga + flag global."""
+    if use_bayesian is not None:
+        return bool(use_bayesian)
+    if model_method in ("bayesian", "hybrid"):
+        return True
+    return bool(USE_BAYESIAN)
+
 def _build(league_id: int, home_team_id: int, away_team_id: int,
            home_name: str, away_name: str, league_name: str,
-           match: dict | None = None, as_of_timestamp: str | None = None) -> dict:
+           match: dict | None = None, as_of_timestamp: str | None = None,
+           use_bayesian: bool | None = None) -> dict:
     model = _model_for(league_id)
     feature = model["feature"]
     window = model["window"]
@@ -214,7 +362,6 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
     }
     if match:
         match = dict(match)
-        # Derivar date de kickoff_datetime (YYYY-MM-DD) para compatibilidade
         kd = match.get("kickoff_datetime") or match.get("match_date")
         base_match.update({
             "id": match["id"],
@@ -222,8 +369,52 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
             "round": match.get("round"),
         })
 
-    return {
+    # provenance
+    try:
+        snap_row = db.run_query("SELECT MAX(kickoff_datetime) m FROM matches WHERE league_id=? AND status='played'", (league_id,))
+        data_snapshot = snap_row[0]["m"] if snap_row and snap_row[0]["m"] else None
+    except Exception:
+        data_snapshot = None
+    try:
+        prov_str = f"{MODEL_CODE_VERSION}|{FEATURE_VERSION}|{model.get('feature')}|{model.get('window')}|{model.get('home_advantage')}|{model.get('rho')}|{model.get('method')}|{model.get('calibrated_at')}"
+        model_version = hashlib.sha256(prov_str.encode()).hexdigest()[:12]
+    except Exception:
+        model_version = MODEL_CODE_VERSION
+    # confidence based on sample size
+    sample_n = model.get("sample_count") or 0
+    total_games = (home_detail.get("count",0)+away_detail.get("count",0))
+    if total_games < 5 or sample_n < 20:
+        confidence_level = "low"
+        fallback_reason = "insufficient_history"
+    elif total_games < 10:
+        confidence_level = "medium"
+        fallback_reason = None
+    else:
+        confidence_level = "high"
+        fallback_reason = None
+    provenance = {
+        "model_version": model_version,
+        "model_method": model.get("method","poisson"),
+        "feature_version": FEATURE_VERSION,
+        "data_snapshot_timestamp": data_snapshot,
+        "as_of_timestamp": as_of_timestamp,
+        "training_window": window,
+        "training_sample_size": sample_n,
+        "league_model_version": model.get("calibrated_at"),
+        "prediction_created_at": datetime.now(timezone.utc).isoformat(),
+        "source_data_freshness": data_snapshot,
+        "confidence_level": confidence_level,
+        "fallback_reason": fallback_reason,
+    }
+    _log.debug("pred provenance league=%s model=%s snap=%s conf=%s", league_id, model_version, data_snapshot, confidence_level)
+
+    response = {
         "match": base_match,
+        "provenance": provenance,
+        "model_version": model_version,
+        "feature_version": FEATURE_VERSION,
+        "data_snapshot_timestamp": data_snapshot,
+        "confidence_level": confidence_level,
         "lambdas": result.lambdas,
         "probs": result.probs,
         "top_scores": result.top_scores,
@@ -235,8 +426,12 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
         "model": {"home_advantage": model["home_advantage"], "window": model["window"],
                   "feature": feature, "rho": model.get("rho", 0.0),
                   "model_type": result.model_type,
+                  "method": model.get("method", "poisson"),
+                  "bayesian": int(model.get("bayesian", 0)),
                   "accuracy": model.get("accuracy"),
-                  "brier": model.get("brier")},
+                  "brier": model.get("brier"),
+                  "model_version": model_version,
+                  "feature_version": FEATURE_VERSION},
         "data": {
             "source": f"sofascore_{feature}",
             "home": {"name": home_name, "avg": home_stats, **home_detail},
@@ -255,8 +450,103 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
         },
     }
 
+    # FASE 13: método de produção bayesian/hybrid troca o oper por estimativas
+    # Gamma-Posterior (bayesian = posterior puro; hybrid = blend MLE↔posterior).
+    # Ajustado na auditoria: posterior calculado sobre a JANELA as-of (sem dupla
+    # contagem e sem vazar jogos futuros); hybrid usa bayesian_lambda_blend real.
+    oper = result
+    model_method = model.get("method", "poisson")
+    if _should_use_bayesian(model_method, use_bayesian):
+        bay_home = _avg_stats_bayesian(league_id, home_team_id, window, as_of_timestamp)
+        bay_away = _avg_stats_bayesian(league_id, away_team_id, window, as_of_timestamp)
 
-def predict_match(match_id: int, as_of_timestamp: str | None = None) -> dict:
+        if model_method in ("bayesian", "hybrid"):
+            if model_method == "hybrid":
+                mix_h = bayesian_lambda_blend(
+                    bay_home["gf_avg"], bay_home["ga_avg"],
+                    home_stats["gf_avg"], home_stats["ga_avg"],
+                    bay_home.get("games_observed", window))
+                mix_a = bayesian_lambda_blend(
+                    bay_away["gf_avg"], bay_away["ga_avg"],
+                    away_stats["gf_avg"], away_stats["ga_avg"],
+                    bay_away.get("games_observed", window))
+                mi_op = MatchInput(
+                    league=league_name,
+                    home=TeamInput(name=home_name, gf_avg=mix_h[0], ga_avg=mix_h[1]),
+                    away=TeamInput(name=away_name, gf_avg=mix_a[0], ga_avg=mix_a[1]),
+                )
+            else:
+                mi_op = MatchInput(
+                    league=league_name,
+                    home=TeamInput(name=home_name, gf_avg=bay_home["gf_avg"], ga_avg=bay_home["ga_avg"]),
+                    away=TeamInput(name=away_name, gf_avg=bay_away["gf_avg"], ga_avg=bay_away["ga_avg"]),
+                )
+            result_bay = run_predict(mi_op, home_advantage=model["home_advantage"],
+                                     rho=model.get("rho", 0.0))
+            oper = result_bay
+            response["bayesian"] = {
+                "lambdas": result_bay.lambdas,
+                "probs": result_bay.probs,
+                "top_scores": result_bay.top_scores,
+                "proposals": result_bay.proposals,
+                "inputs": {"home": bay_home, "away": bay_away},
+                "home_bayesian_weight": bay_home.get("bayesian_weight", 0),
+                "away_bayesian_weight": bay_away.get("bayesian_weight", 0),
+                "model_type": result_bay.model_type,
+            }
+            response["lambdas"] = result_bay.lambdas
+            response["probs"] = result_bay.probs
+            response["top_scores"] = result_bay.top_scores
+            response["proposals"] = result_bay.proposals
+            response["inputs"] = {"home": bay_home, "away": bay_away}
+            response["model"]["model_type"] = result_bay.model_type
+            response["model"]["method"] = model_method
+        else:
+            # método poisson: bayesiano apenas como referência (produção intacta)
+            mi_bay = MatchInput(
+                league=league_name,
+                home=TeamInput(name=home_name, gf_avg=bay_home["gf_avg"], ga_avg=bay_home["ga_avg"]),
+                away=TeamInput(name=away_name, gf_avg=bay_away["gf_avg"], ga_avg=bay_away["ga_avg"]),
+            )
+            result_bay = run_predict(mi_bay, home_advantage=model["home_advantage"],
+                                     rho=model.get("rho", 0.0))
+            response["bayesian"] = {
+                "lambdas": result_bay.lambdas,
+                "probs": result_bay.probs,
+                "top_scores": result_bay.top_scores,
+                "proposals": result_bay.proposals,
+                "inputs": {"home": bay_home, "away": bay_away},
+                "home_bayesian_weight": bay_home.get("bayesian_weight", 0),
+                "away_bayesian_weight": bay_away.get("bayesian_weight", 0),
+                "model_type": result_bay.model_type,
+            }
+
+    # FASE 14: modificadores contextuais (rest/form/team_ha) sobre o λ operante.
+    # Nunca substituem o cálculo Poisson — apenas ajustam λ dentro de bounds (§7).
+    flags = _context_flags(model)
+    if any(flags.values()):
+        kickoff = (match or {}).get("kickoff_datetime") or (match or {}).get("match_date")
+        kickoff_ts = _kickoff_ts(kickoff) if kickoff else None
+        as_of_ctx = as_of_timestamp or kickoff
+        ctx = _apply_context(flags,
+                             oper.lambdas["home"], oper.lambdas["away"],
+                             league_id, home_team_id, away_team_id,
+                             kickoff_ts, as_of_ctx,
+                             home_name, away_name,
+                             model.get("rho", 0.0))
+        if ctx is not None:
+            response["lambdas"] = ctx["lambdas"]
+            response["probs"] = ctx["probs"]
+            response["top_scores"] = ctx["top_scores"]
+            response["proposals"] = ctx["proposals"]
+            response["context"] = flags
+            response["model"]["context"] = flags
+            response["data"]["model"]["context"] = flags
+
+    return response
+
+
+def predict_match(match_id: int, as_of_timestamp: str | None = None, use_bayesian: bool | None = None) -> dict:
     # O jogo previsto deve sempre ser encontrado; o filtro as-of aplica-se
     # apenas ao histórico usado nas features (dentro de _build).
     query = (
@@ -272,28 +562,23 @@ def predict_match(match_id: int, as_of_timestamp: str | None = None) -> dict:
         raise IndexError("Partida não encontrada")
     m = rows[0]
     return _build(m["league_id"], m["home_team_id"], m["away_team_id"],
-                  m["home_name"], m["away_name"], m["league_name"], m, as_of_timestamp)
+                  m["home_name"], m["away_name"], m["league_name"], m, as_of_timestamp, use_bayesian)
 
 
 def predict_league_upcoming(league_id: int, limit: int = 10,
-                            as_of_timestamp: str | None = None) -> list[dict]:
-    if as_of_timestamp:
-        condition = "AND date(kickoff_datetime) < date(?)"
-        params = (league_id, limit, as_of_timestamp)
-    else:
-        condition = ""
-        params = (league_id, limit)
-    
+                             as_of_timestamp: str | None = None, use_bayesian: bool | None = None) -> list[dict]:
+    condition = "AND status='scheduled' AND datetime(kickoff_datetime) >= datetime(?)"
+    params = (league_id, as_of_timestamp or datetime.now(timezone.utc).isoformat(), limit)
     query = (
         "SELECT id FROM matches WHERE league_id=? {condition} "
         "ORDER BY kickoff_datetime, id LIMIT ?"
     ).format(condition=condition)
     rows = db.run_query(query, params)
-    return [predict_match(r["id"], as_of_timestamp) for r in rows]
+    return [predict_match(r["id"], as_of_timestamp, use_bayesian) for r in rows]
 
 
 def predict_fixture(league_id: int, home_team_id: int, away_team_id: int,
-                    as_of_timestamp: str | None = None) -> dict:
+                    as_of_timestamp: str | None = None, use_bayesian: bool | None = None) -> dict:
     l = db.run_query("SELECT id, name, country FROM leagues WHERE id=?", (league_id,))[0]
     rows = db.run_query(
         "SELECT id, name FROM teams WHERE league_id=? AND id IN (?,?)",
@@ -303,4 +588,4 @@ def predict_fixture(league_id: int, home_team_id: int, away_team_id: int,
         raise IndexError("Confronto não encontrado")
     return _build(league_id, home_team_id, away_team_id,
                   names[home_team_id], names[away_team_id], l["name"],
-                  as_of_timestamp=as_of_timestamp)
+                  as_of_timestamp=as_of_timestamp, use_bayesian=use_bayesian)

@@ -1,8 +1,42 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { api } from './api.js'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { api, setOnUnauthorized } from './api.js'
+import { usePolling } from './hooks/usePolling.js'
 
-const TOKEN_KEY = 'ap2web_token'
-const USER_KEY = 'ap2web_user'
+export default function App() {
+  const [username, setUsername] = useState(null)
+  const [restoring, setRestoring] = useState(true)
+
+  useEffect(() => {
+    let active = true
+    // Restauração de sessão via cookie HttpOnly (sem token em localStorage).
+    api.me()
+      .then((data) => { if (active) setUsername(data.username) })
+      .catch(() => {})
+      .finally(() => { if (active) setRestoring(false) })
+    setOnUnauthorized(() => { if (active) { setUsername(null); setRestoring(false) } })
+   return () => { active = false; setOnUnauthorized(null) }
+  }, [])
+
+  function handleLogin(data) {
+    setUsername(data.username)
+  }
+
+  function handleLogout() {
+    api.logout().catch(() => {})
+    setUsername(null)
+  }
+
+  if (restoring) {
+    return (
+      <div className="auth-wrap">
+        <div className="auth-card"><p className="muted">Carregando sessão…</p></div>
+      </div>
+    )
+  }
+  if (!username) return <AuthScreen onLogin={handleLogin} />
+
+  return <Dashboard username={username} token={null} onLogout={handleLogout} />
+}
 
 const FLAGS = {
   Spain: '🇪🇸', England: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', Germany: '🇩🇪', Italy: '🇮🇹', France: '🇫🇷',
@@ -15,6 +49,9 @@ const FLAGS = {
   Denmark: '🇩🇰', Sweden: '🇸🇪', Norway: '🇳🇴', Finland: '🇫🇮', Canada: '🇨🇦',
   'South Korea': '🇰🇷', 'Saudi Arabia': '🇸🇦', Qatar: '🇶🇦', Egypt: '🇪🇬', Croatia: '🇭🇷',
   Serbia: '🇷🇸', Romania: '🇷🇴', Czech: '🇨🇿', Slovakia: '🇸🇰', Hungary: '🇭🇺',
+  India: '🇮🇳', Vietnam: '🇻🇳', 'South Africa': '🇿🇦', Iceland: '🇮🇸', Latvia: '🇱🇻',
+  Bulgaria: '🇧🇬', Israel: '🇮🇱', Slovenia: '🇸🇮', Wales: '🏴󠁧󠁢󠁷󠁬󠁳󠁿', 'Northern Ireland': '🇬🇧',
+  Malta: '🇲🇹', Panama: '🇵🇦',
 }
 
 function flag(country) {
@@ -35,6 +72,10 @@ const CONTINENTS = {
   Ireland: 'Europa', Denmark: 'Europa', Sweden: 'Europa', Norway: 'Europa',
   Finland: 'Europa', Croatia: 'Europa', Serbia: 'Europa', Romania: 'Europa',
   Czech: 'Europa', Slovakia: 'Europa', Hungary: 'Europa', Belarus: 'Europa',
+  Bulgaria: 'Europa', Israel: 'Ásia', Slovenia: 'Europa', Iceland: 'Europa',
+  Latvia: 'Europa', Wales: 'Europa', 'Northern Ireland': 'Europa', Malta: 'Europa',
+  India: 'Ásia', Vietnam: 'Ásia', 'South Africa': 'África',
+  Panama: 'América do Norte',
   Japan: 'Ásia', China: 'Ásia', 'South Korea': 'Ásia', 'Saudi Arabia': 'Ásia',
   Qatar: 'Ásia',
   Egypt: 'África',
@@ -48,6 +89,30 @@ function continent(country) {
   return CONTINENTS[country] || CONTINENTS[country.split(' ')[0]] || 'Outros'
 }
 
+const METHOD_META = {
+  bayesian: { icon: '🧠', label: 'Bayesiano' },
+  hybrid: { icon: '⚖️', label: 'Híbrido' },
+  poisson: { icon: '🎲', label: 'Poisson' },
+}
+
+function methodBadge(method) {
+  const m = METHOD_META[method] || METHOD_META.poisson
+  return <span className={`badge method-${method || 'poisson'}`}>{m.icon} {m.label}</span>
+}
+
+const CTX_META = [
+  ['ctx_rest', '😴 descanso'],
+  ['ctx_form', '📈 forma'],
+  ['ctx_team_ha', '🏟️ mando'],
+]
+
+function ctxChips(ctx) {
+  if (!ctx) return <span className="muted">—</span>
+  const on = CTX_META.filter(([k]) => ctx[k] || ctx[k.replace('ctx_', '')]).map(([, label]) => label)
+  if (on.length === 0) return <span className="muted small">base</span>
+  return on.join(' · ')
+}
+
 const STAT_LABELS = {
   xg: 'xG', xg_on_target: 'xG no alvo', possession: 'Posse',
   shots_total: 'Chutes', shots_on_target: 'No gol', shots_off_target: 'Fora',
@@ -58,29 +123,6 @@ const STAT_LABELS = {
   saves: 'Defesas', interceptions: 'Interceptações', recoveries: 'Recuperações',
   tackles: 'Desarmes', dribbles: 'Dribles', duels: 'Duelos', aerial_duels: 'Duelos aéreos',
   final_third: 'Final 1/3', throw_ins: 'Laterais', goal_kicks: 'Tiros de meta',
-}
-
-export default function App() {
-  const [token, setToken] = useState(localStorage.getItem(TOKEN_KEY))
-  const [username, setUsername] = useState(localStorage.getItem(USER_KEY) || '')
-
-  function handleLogin(tok, user) {
-    localStorage.setItem(TOKEN_KEY, tok)
-    localStorage.setItem(USER_KEY, user)
-    setToken(tok)
-    setUsername(user)
-  }
-
-  function handleLogout() {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(USER_KEY)
-    setToken(null)
-    setUsername('')
-  }
-
-  if (!token) return <AuthScreen onLogin={handleLogin} />
-
-  return <Dashboard username={username} token={token} onLogout={handleLogout} />
 }
 
 function AuthScreen({ onLogin }) {
@@ -96,8 +138,8 @@ function AuthScreen({ onLogin }) {
     setLoading(true)
     try {
       if (mode === 'register') await api.register(username, password)
-      const { token, username: user } = await api.login(username, password)
-      onLogin(token, user)
+      const data = await api.login(username, password)
+      onLogin(data)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -123,9 +165,9 @@ function AuthScreen({ onLogin }) {
         </form>
         <p className="toggle">
           {mode === 'login' ? 'Não tem conta?' : 'Já tem conta?'}
-          <a onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>
+          <button type="button" className="btn-link" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>
             {mode === 'login' ? ' Cadastrar' : ' Entrar'}
-          </a>
+          </button>
         </p>
       </div>
     </div>
@@ -151,19 +193,16 @@ function Dashboard({ username, token, onLogout }) {
   const [openConts, setOpenConts] = useState(() => new Set(['Europa']))
   const [learn, setLearn] = useState(null)
   const [cal, setCal] = useState(null)
-  const [calTimer, setCalTimer] = useState(null)
   const [backtest, setBacktest] = useState(null)
   const [backtesting, setBacktesting] = useState(false)
   const [curve, setCurve] = useState(null)
   const [curveLoading, setCurveLoading] = useState(false)
 
   const [sofa, setSofa] = useState(null)
-  const [sofaTimer, setSofaTimer] = useState(null)
   const [sofaStatus, setSofaStatus] = useState(null)
   const [sofaLeague, setSofaLeague] = useState('')
   const [sofaSelFields, setSofaSelFields] = useState(['xg', 'possession', 'shots_on_target', 'corners', 'yellow_cards'])
   const [sofaTeamFilter, setSofaTeamFilter] = useState('')
-  const [sofaRoundFilter, setSofaRoundFilter] = useState('')
 
   const [histLoading, setHistLoading] = useState(false)
 
@@ -172,65 +211,67 @@ function Dashboard({ username, token, onLogout }) {
   const [evolHist, setEvolHist] = useState(null)
 
   const [btStatus, setBtStatus] = useState(null)
+  const [btJob, setBtJob] = useState(null)
   const [btHistory, setBtHistory] = useState(null)
   const [btMeta, setBtMeta] = useState(null)
   const [btCvResult, setBtCvResult] = useState(null)
   const [btRunning, setBtRunning] = useState(false)
   const [btInterval, setBtInterval] = useState(6)
-  const [btTimer, setBtTimer] = useState(null)
   const [btSummary, setBtSummary] = useState(null)
 
-  async function refreshLeagues() {
+  const refreshLeagues = useCallback(async () => {
     const raw = await api.leagues(token)
     // Deduplicate by league id — sem spread de iterador (bug de transpilação esbuild)
     const byId = {}
     raw.forEach(l => { byId[l.id] = l })
     setLeagues(Object.values(byId))
-  }
+  }, [token])
+
+  const loadHistory = useCallback(async () => {
+    setHistLoading(true)
+    try { setHist(await api.predictions(token)) } catch (e) { setError(e.message) }
+    setHistLoading(false)
+  }, [token])
+
+  const loadLearning = useCallback(async () => {
+    try { setLearn(await api.learningStatus(token)) } catch (e) { setError(e.message) }
+  }, [token])
+
+  const loadSofa = useCallback(async (leagueId) => {
+    try { setSofa(await api.sofascoreData(leagueId, token)) } catch (e) { setError(e.message) }
+  }, [token])
 
   useEffect(() => {
     refreshLeagues().catch(e => setError(e.message))
     if (tab === 'historico') loadHistory()
     if (tab === 'aprendizado') loadLearning()
     if (tab === 'sofascore') loadSofa()
-  }, [tab])
+  }, [tab, refreshLeagues, loadHistory, loadLearning, loadSofa])
 
-  useEffect(() => () => clearInterval(calTimer), [calTimer])
-  useEffect(() => () => clearInterval(sofaTimer), [sofaTimer])
-  useEffect(() => () => clearInterval(btTimer), [btTimer])
-
-  async function loadHistory() {
-    setHistLoading(true)
-    try { setHist(await api.predictions(token)) } catch (e) { setError(e.message) }
-    setHistLoading(false)
-  }
-
-  async function loadLearning() {
-    try { setLearn(await api.learningStatus(token)) } catch (e) { setError(e.message) }
-  }
-
-  async function loadSofa(leagueId) {
-    try { setSofa(await api.sofascoreData(leagueId, token)) } catch (e) { setError(e.message) }
-  }
+  usePolling(opts => api.job(sofaStatus?.id, token, opts), {
+    enabled: Boolean(sofaStatus?.id && ['pending', 'running'].includes(sofaStatus.status)),
+    stopWhen: j => !['pending', 'running'].includes(j.status),
+    onTick: j => { setSofaStatus(j); if (!['pending', 'running'].includes(j.status)) loadSofa(sofaLeague || undefined) },
+    onError: e => setError(e.message),
+  })
+  usePolling(opts => api.job(cal?.id, token, opts), {
+    enabled: Boolean(cal?.id && ['pending', 'running'].includes(cal.status)), interval: 3000,
+    stopWhen: j => !['pending', 'running'].includes(j.status),
+    onTick: j => { setCal(j); if (!['pending', 'running'].includes(j.status)) loadLearning() },
+    onError: e => setError(e.message),
+  })
+  usePolling(opts => api.job(btJob?.id, token, opts), {
+    enabled: Boolean(btJob?.id && ['pending', 'running'].includes(btJob.status)), interval: 3000,
+    stopWhen: j => !['pending', 'running'].includes(j.status),
+    onTick: j => { setBtJob(j); if (!['pending', 'running'].includes(j.status)) loadBtStatus() },
+    onError: e => setError(e.message),
+  })
 
   async function startSofaSync(leagueId) {
     setLoading(true); setError('')
     try {
-      if (leagueId) await api.sofascoreSyncLeague(leagueId, token)
-      else await api.sofascoreSync(token)
-      const t = setInterval(async () => {
-        try {
-          const s = await api.sofascoreStatus(token)
-          setSofaStatus(s)
-          if (!s.running) {
-            clearInterval(t); setSofaTimer(null)
-            loadSofa(sofaLeague || undefined)
-            // refreshLeagues removed from here - called only once on login/tab change
-          }
-        } catch {}
-      }, 2500)
-      setSofaTimer(t)
-      setSofaStatus({ running: true, done: 0, total: 1, current: 'aguardando...' })
+      const res = leagueId ? await api.sofascoreSyncLeague(leagueId, token) : await api.sofascoreSync(token)
+      setSofaStatus(res.job)
     } catch (e) { setError(e.message) }
     setLoading(false)
   }
@@ -238,19 +279,8 @@ function Dashboard({ username, token, onLogout }) {
   async function startCalibration() {
     setLoading(true); setError('')
     try {
-      await api.learningCalibrate(token)
-      clearInterval(calTimer)
-      const t = setInterval(async () => {
-        try {
-          const s = await api.learningCalibrateStatus(token)
-          setCal(s)
-          if (!s.running) {
-            clearInterval(t); setCalTimer(null)
-            loadLearning()
-          }
-        } catch {}
-      }, 3000)
-      setCalTimer(t)
+      const res = await api.learningCalibrate(token)
+      setCal(res.job)
       loadLearning()
     } catch (e) { setError(e.message) }
     setLoading(false)
@@ -283,40 +313,32 @@ function Dashboard({ username, token, onLogout }) {
   async function loadEvolutionHistory() {
     try {
       setEvolHist(await api.evolutionHistory(50, token))
-    } catch (e) { /* histórico é opcional — não bloqueia a aba */ }
+    } catch (_e) { /* histórico é opcional — não bloqueia a aba */ }
   }
 
   async function loadBtStatus() {
     try { setBtStatus(await api.backtestStatus(token)) } catch (e) { setError(e.message) }
-    try { setBtHistory(await api.backtestHistory(10, token)) } catch (e) {}
-    try { setBtMeta(await api.backtestMeta(token)) } catch (e) {}
-    try { setBtSummary(await api.backtestSummary(token)) } catch (e) {}
+    try { setBtHistory(await api.backtestHistory(10, token)) } catch (_e) {}
+    try { setBtMeta(await api.backtestMeta(token)) } catch (_e) {}
+    try { setBtSummary(await api.backtestSummary(token)) } catch (_e) {}
   }
 
   async function startBtLoop() {
     setBtRunning(true); setError('')
     try {
-      await api.backtestStart(btInterval, token)
-      clearInterval(btTimer)
-      const t = setInterval(async () => {
-        try {
-          const s = await api.backtestStatus(token)
-          setBtStatus(s)
-          if (!s.running) {
-            clearInterval(t); setBtTimer(null)
-            loadBtStatus()
-          }
-        } catch {}
-      }, 3000)
-      setBtTimer(t)
+      const res = await api.backtestStart(btInterval, token)
+      setBtJob(res.job)
+      setBtStatus(previous => ({ ...previous, running: true }))
     } catch (e) { setError(e.message) }
     setBtRunning(false)
   }
 
   async function stopBtLoop() {
     try {
-      await api.backtestStop(token)
-      clearInterval(btTimer); setBtTimer(null)
+      if (btJob?.id && ['pending', 'running'].includes(btJob.status)) {
+        await api.cancelJob(btJob.id, token)
+        setBtJob(previous => ({ ...previous, status: 'cancelled' }))
+      }
       loadBtStatus()
     } catch (e) { setError(e.message) }
   }
@@ -325,7 +347,8 @@ function Dashboard({ username, token, onLogout }) {
     setBtRunning(true); setError(''); setBtCvResult(null)
     try {
       const result = await api.backtestRun(leagueIds, token)
-      setBtCvResult(result)
+      setBtJob(result.job)
+      setBtCvResult(result.job)
       loadBtStatus()
     } catch (e) { setError(e.message) }
     setBtRunning(false)
@@ -374,7 +397,10 @@ function Dashboard({ username, token, onLogout }) {
       const res = await api.sofascoreSyncLeague(cfLeague, token)
       await refreshLeagues()
       await onCfLeagueChange(cfLeague)
-      if (res.ok) alert(`Sincronização da liga concluída: ${res.matches_saved} novas partidas salvas`)
+      if (res.ok) {
+        setSofaStatus(res.job)
+        alert(`Sincronização enfileirada: job ${res.job_id}. Acompanhe na aba Sofascore.`)
+      }
       else alert(`Falha na sincronização: ${res.error || 'erro desconhecido'}`)
     } catch (e) { setError(e.message) }
     setLoading(false)
@@ -458,7 +484,7 @@ function Dashboard({ username, token, onLogout }) {
         </nav>
         <div className="user">
           <span>{username}</span>
-          <a onClick={onLogout}>Sair</a>
+          <button type="button" className="btn-link" onClick={onLogout} aria-label="Sair da conta">Sair</button>
         </div>
       </header>
       {error && <div className="error banner" onClick={() => setError('')}>✕ {error}</div>}
@@ -650,19 +676,19 @@ function Dashboard({ username, token, onLogout }) {
                 <h3>🧠 Aprendizado do motor</h3>
                 <p className="muted small">Fator de mando (HA) e janela deslizante calibrados por liga via backtest honesto (prevê cada jogo usando só os jogos anteriores).</p>
               </div>
-              <button className="btn-primary" onClick={startCalibration} disabled={loading || (cal && cal.running)}>
-                {cal && cal.running ? `Calibrando ${cal.done}/${cal.total}...` : '⚡ Recalibrar todas'}
+              <button className="btn-primary" onClick={startCalibration} disabled={loading || ['pending', 'running'].includes(cal?.status)}>
+                {['pending', 'running'].includes(cal?.status) ? `Calibrando ${Math.round((cal.progress || 0) * 100)}%...` : '⚡ Recalibrar todas'}
               </button>
             </div>
 
             {!learn && <div className="muted small" style={{ padding: '14px 0' }}>Carregando estado do aprendizado...</div>}
 
-            {cal && cal.running && (
+            {['pending', 'running'].includes(cal?.status) && (
               <div className="batch-progress">
                 <div className="progress-track">
-                  <div className="progress-fill" style={{ width: `${cal.total ? (cal.done / cal.total) * 100 : 0}%` }} />
+                  <div className="progress-fill" style={{ width: `${(cal.progress || 0) * 100}%` }} />
                 </div>
-                <p className="muted small">{cal.done}/{cal.total} ligas{cal.current ? ` · agora: ${cal.current}` : ''}</p>
+                <p className="muted small">{Math.round((cal.progress || 0) * 100)}%{cal.detail ? ` · ${cal.detail}` : ''}</p>
               </div>
             )}
 
@@ -676,7 +702,7 @@ function Dashboard({ username, token, onLogout }) {
                 <div className="table-scroll" style={{ marginTop: 14 }}>
                   <table className="runs">
                     <thead>
-                      <tr><th>Liga</th><th>Feature</th><th>HA</th><th>Janela</th><th>Acurácia</th><th>Brier</th><th>Amostras</th><th>Calibrada</th><th></th></tr>
+                      <tr><th>Liga</th><th>Feature</th><th>HA</th><th>Janela</th><th>Método</th><th>Contexto</th><th>Acurácia</th><th>Brier</th><th>Amostras</th><th>Calibrada</th><th></th></tr>
                     </thead>
                     <tbody>
                       {[...learn.calibrated]
@@ -687,6 +713,8 @@ function Dashboard({ username, token, onLogout }) {
                             <td>{lm.feature}</td>
                             <td>{Number(lm.home_advantage).toFixed(2)}</td>
                             <td>{lm.window}</td>
+                            <td>{methodBadge(lm.method)}</td>
+                            <td>{ctxChips(lm)}</td>
                             <td>{lm.accuracy ? `${lm.accuracy.toFixed(1)}%` : '—'}</td>
                             <td>{lm.brier ? lm.brier.toFixed(3) : '—'}</td>
                             <td>{lm.sample_count}</td>
@@ -727,7 +755,7 @@ function Dashboard({ username, token, onLogout }) {
                     honesto em todas as ligas calibradas — cada liga com o seu modelo (feature, HA, janela).
                   </p>
                 </div>
-                <button className="btn-small" onClick={loadCurve} disabled={curveLoading || (cal && cal.running)}>
+                <button className="btn-small" onClick={loadCurve} disabled={curveLoading || ['pending', 'running'].includes(cal?.status)}>
                   {curveLoading ? 'Calculando...' : (curve ? '🔄 Recalcular' : '📈 Calcular curva')}
                 </button>
               </div>
@@ -769,7 +797,7 @@ function Dashboard({ username, token, onLogout }) {
             <div className="table-scroll">
               <table className="runs">
                 <thead>
-                  <tr><th>Liga</th><th>País</th><th>Jogados</th><th>Agendados</th><th>Temporada</th><th>Último sync</th><th>Feature</th><th>HA</th><th>Jan</th><th>Acur.</th><th>Brier</th></tr>
+                  <tr><th>Liga</th><th>País</th><th>Jogados</th><th>Agendados</th><th>Temporada</th><th>Último sync</th><th>Feature</th><th>HA</th><th>Jan</th><th>Método</th><th>Ctx</th><th>Acur.</th><th>Brier</th></tr>
                 </thead>
                 <tbody>
                   {leagues.map(r => {
@@ -785,13 +813,15 @@ function Dashboard({ username, token, onLogout }) {
                         <td>{lm?.feature || '—'}</td>
                         <td>{lm?.home_advantage != null ? Number(lm.home_advantage).toFixed(2) : '—'}</td>
                         <td>{lm?.window || '—'}</td>
+                        <td>{lm ? methodBadge(lm.method) : '—'}</td>
+                        <td>{lm ? ctxChips(lm) : '—'}</td>
                         <td>{lm?.accuracy ? `${lm.accuracy.toFixed(1)}%` : '—'}</td>
                         <td>{lm?.brier != null ? lm.brier.toFixed(3) : '—'}</td>
                       </tr>
                     )
                   })}
                   {leagues.length === 0 && (
-                    <tr><td colSpan={11} className="muted">Nenhuma liga sincronizada ainda. Use a aba Sofascore para puxar os dados.</td></tr>
+                    <tr><td colSpan={13} className="muted">Nenhuma liga sincronizada ainda. Use a aba Sofascore para puxar os dados.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -808,7 +838,7 @@ function Dashboard({ username, token, onLogout }) {
                 <h3>📊 Sofascore — dados ricos por jogo</h3>
                 <p className="muted small">
                   Todas as ligas configuradas via API do Sofascore (xG, posse, chutes, passes, escanteios...).
-                  Marque as métricas que importam para filtrar e comparar.
+                  Mostra somente a <b>próxima rodada</b> agendada de cada liga. Marque as métricas que importam para comparar.
                 </p>
               </div>
               <div className="btn-row">
@@ -827,36 +857,36 @@ function Dashboard({ username, token, onLogout }) {
                 </label>
                 {sofaLeague && (
                   <button className="btn-primary" onClick={() => startSofaSync(sofaLeague)}
-                          disabled={loading || (sofaStatus && sofaStatus.running)}>
+                          disabled={loading || ['pending', 'running'].includes(sofaStatus?.status)}>
                     📥 Sync liga
                   </button>
                 )}
                 <button className="btn-primary" onClick={() => startSofaSync()}
-                        disabled={loading || (sofaStatus && sofaStatus.running)}>
-                  {sofaStatus && sofaStatus.running ? `Sincronizando ${sofaStatus.done}/${sofaStatus.total}...` : '📥 Sincronizar tudo'}
+                        disabled={loading || ['pending', 'running'].includes(sofaStatus?.status)}>
+                  {['pending', 'running'].includes(sofaStatus?.status) ? `Sincronizando ${Math.round((sofaStatus.progress || 0) * 100)}%...` : '📥 Sincronizar tudo'}
                 </button>
               </div>
             </div>
 
-            {sofaStatus && sofaStatus.running && (
+            {['pending', 'running'].includes(sofaStatus?.status) && (
               <div className="batch-progress">
                 <div className="progress-track">
-                  <div className="progress-fill" style={{ width: `${sofaStatus.total ? (sofaStatus.done / sofaStatus.total) * 100 : 0}%` }} />
+                  <div className="progress-fill" style={{ width: `${(sofaStatus.progress || 0) * 100}%` }} />
                 </div>
-                <p className="muted small">{sofaStatus.done}/{sofaStatus.total} ligas · {sofaStatus.ok} ok · {sofaStatus.fail} falhas{sofaStatus.current ? ` · agora: ${sofaStatus.current}` : ''}</p>
+                <p className="muted small">{Math.round((sofaStatus.progress || 0) * 100)}%{sofaStatus.detail ? ` · ${sofaStatus.detail}` : ''}</p>
               </div>
             )}
-            {sofaStatus && !sofaStatus.running && sofaStatus.error && (
-              <p className="error" style={{ marginTop: 8 }}>✕ {sofaStatus.error}</p>
+            {sofaStatus && !['pending', 'running'].includes(sofaStatus.status) && sofaStatus.error_message && (
+              <p className="error" style={{ marginTop: 8 }}>✕ {sofaStatus.error_message}</p>
             )}
-            {sofaStatus && !sofaStatus.running && sofaStatus.finished_at && sofaStatus.errors?.length > 0 && (
+            {sofaStatus && !['pending', 'running'].includes(sofaStatus.status) && sofaStatus.finished_at && sofaStatus.result?.errors?.length > 0 && (
               <p className="muted small" style={{ marginTop: 8, color: '#fbbf24' }}>
-                ⚠️ Liga(s) com falha: {sofaStatus.errors.map(e => e.league).join(', ')}
+                ⚠️ Liga(s) com falha: {sofaStatus.result.errors.map(e => e.league).join(', ')}
               </p>
             )}
             {sofa && sofa.length > 0 && (
               <p className="muted small" style={{ marginTop: 8 }}>
-                ✅ {sofa.length} jogos carregados
+                ✅ {sofa.length} jogos da próxima rodada
                 {sofaStatus?.finished_at ? ` · sincronizado em ${sofaStatus.finished_at}` : ''}
               </p>
             )}
@@ -868,15 +898,6 @@ function Dashboard({ username, token, onLogout }) {
                     Time
                     <input className="search" style={{ width: 180 }} placeholder="Buscar time..."
                            value={sofaTeamFilter} onChange={e => setSofaTeamFilter(e.target.value)} />
-                  </label>
-                  <label>
-                    Rodada
-                    <select value={sofaRoundFilter} onChange={e => setSofaRoundFilter(e.target.value)}>
-                      <option value="">Todas</option>
-                      {[...new Set(sofa.map(m => m.round).filter(r => r != null))].sort((a, b) => a - b).map(r => (
-                        <option key={r} value={r}>Rodada {r}</option>
-                      ))}
-                    </select>
                   </label>
                   <label>
                     Métricas
@@ -914,7 +935,6 @@ function Dashboard({ username, token, onLogout }) {
                         .filter(m => !sofaTeamFilter.trim()
                           || m.home.toLowerCase().includes(sofaTeamFilter.trim().toLowerCase())
                           || m.away.toLowerCase().includes(sofaTeamFilter.trim().toLowerCase()))
-                        .filter(m => !sofaRoundFilter || String(m.round) === sofaRoundFilter)
                         .map(m => (
                           <tr key={m.id}>
                             <td>{m.round}</td>
@@ -1019,32 +1039,37 @@ function Dashboard({ username, token, onLogout }) {
                         <tr><th>Liga</th><th>Acurácia</th><th>Brier</th><th>LogLoss</th><th>Evolução</th></tr>
                       </thead>
                       <tbody>
-                        {Object.entries(evol.current.leagues).map(([lid, m]) => {
-                          if (m.error) return <tr key={lid}><td>{lid}</td><td colSpan={4} className="muted">{m.error}</td></tr>
-                          const evo = evol.evolution?.[lid]
-                          const accEvo = evo?.poisson_accuracy?.pct
-                          const brierEvo = evo?.poisson_brier?.pct
-                          const loglossEvo = evo?.poisson_logloss?.pct
-                          // acurácia: +bom; brier/logloss: -bom
-                          const formatEvo = (val, inverted) => {
-                            if (val == null) return '—'
-                            const sign = val > 0 ? '+' : ''
-                            const color = inverted ? (val < 0 ? '#22c55e' : val > 0 ? '#ef4444' : '#94a3b8') : (val > 0 ? '#22c55e' : val < 0 ? '#ef4444' : '#94a3b8')
-                            return <span style={{ color, fontWeight: 600 }}>{sign}{val.toFixed(2)}%</span>
-                          }
-                          return (
-                            <tr key={lid}>
-                              <td><b>{lid}</b></td>
-                              <td>{m.poisson_accuracy}%</td>
-                              <td>{m.poisson_brier}</td>
-                              <td>{m.poisson_logloss ?? '—'}</td>
-                              <td style={{ fontSize: '0.85em' }}>
-                                acc {formatEvo(accEvo, false)}<br/>
-                                brier {formatEvo(brierEvo, true)}
-                              </td>
-                            </tr>
-                          )
-                        })}
+                        {Object.entries(evol.current.leagues)
+                          .filter(([_lid, m]) => !m.error)
+                          .sort((a, b) => {
+                            const accA = a[1].poisson_accuracy || 0
+                            const accB = b[1].poisson_accuracy || 0
+                            return accB - accA // Ordem decrescente (melhores no topo)
+                          })
+                          .map(([lid, m]) => {
+                            const evo = evol.evolution?.[lid]
+                            const accEvo = evo?.poisson_accuracy?.pct
+                            const brierEvo = evo?.poisson_brier?.pct
+                            // acurácia: +bom; brier/logloss: -bom
+                            const formatEvo = (val, inverted) => {
+                              if (val == null) return '—'
+                              const sign = val > 0 ? '+' : ''
+                              const color = inverted ? (val < 0 ? '#22c55e' : val > 0 ? '#ef4444' : '#94a3b8') : (val > 0 ? '#22c55e' : val < 0 ? '#ef4444' : '#94a3b8')
+                              return <span style={{ color, fontWeight: 600 }}>{sign}{val.toFixed(2)}%</span>
+                            }
+                            return (
+                              <tr key={lid}>
+                                <td><b>{m.league_name || lid}</b></td>
+                                <td>{m.poisson_accuracy}%</td>
+                                <td>{m.poisson_brier}</td>
+                                <td>{m.poisson_logloss ?? '—'}</td>
+                                <td style={{ fontSize: '0.85em' }}>
+                                  acc {formatEvo(accEvo, false)}<br/>
+                                  brier {formatEvo(brierEvo, true)}
+                                </td>
+                              </tr>
+                            )
+                          })}
                       </tbody>
                     </table>
                   </div>
@@ -1060,10 +1085,11 @@ function Dashboard({ username, token, onLogout }) {
                   {lids.map(lid => {
                     const pts = evolHist.series[lid].filter(p => p.acc != null)
                     if (pts.length < 2) return null
+                    const lname = evol.current?.leagues?.[lid]?.league_name || `Liga ${lid}`
                     return (
                       <LineChart key={lid}
                                  data={pts.map(p => ({ x: p.n, y: p.acc }))}
-                                 title={`Liga ${lid} · acurácia ao longo das medições`}
+                                 title={`${lname} · acurácia ao longo das medições`}
                                  xLabel="medições" yLabel="acurácia %" />
                     )
                   })}
@@ -1360,7 +1386,6 @@ function Dashboard({ username, token, onLogout }) {
                     <tbody>
                       {btSummary.leagues.map((l, i) => {
                         const trendIcon = l.trend === 'evolution' ? '🟢' : l.trend === 'involution' ? '🔴' : '🟡'
-                        const trendColor = l.trend === 'evolution' ? '#22c55e' : l.trend === 'involution' ? '#ef4444' : '#eab308'
                         const errorRate = l.total > 0 ? (l.wrong / l.total * 100).toFixed(1) : 0
                         return (
                           <tr key={i}>
@@ -1587,7 +1612,7 @@ function PredictionView({ p, token, onSave }) {
     setRiskLoading(true)
     try {
       setRisk(await api.riskMatch(match.id, token, { kelly_fraction: riskKelly, bankroll: riskBankroll }))
-    } catch (e) { /* risco é opcional */ }
+    } catch (_e) { /* risco é opcional */ }
     setRiskLoading(false)
   }
 
@@ -1623,9 +1648,16 @@ function PredictionView({ p, token, onSave }) {
         </div>
       </div>
 
+      <p className="experimental-notice">
+        Experimental: probabilidades e mercados sao informativos, sem validacao
+        temporal concluida ou garantia de desempenho.
+      </p>
+
       {model && (model.accuracy != null || model.home_advantage) && (
         <div className="model-chip">
           🧠 modelo {match.league}: {model.feature || 'xg'} · HA {Number(model.home_advantage).toFixed(2)} · janela {model.window}
+          {model.method && <> · {METHOD_META[model.method]?.icon} {METHOD_META[model.method]?.label || model.method}</>}
+          {model.context && Object.values(model.context).some(Boolean) && <> · ctx {ctxChips(model.context)}</>}
           {model.accuracy != null && <> · acurácia {Number(model.accuracy).toFixed(1)}%</>}
           {model.brier != null && <> · Brier {Number(model.brier).toFixed(3)}</>}
         </div>
@@ -1635,7 +1667,7 @@ function PredictionView({ p, token, onSave }) {
       {match.id && (
         <div className="risk-panel">
           <div className="risk-header">
-            <h4>🛡️ Gestão de Risco</h4>
+            <h4>🛡️ Gestão de Risco <span className="experimental-tag">experimental</span></h4>
             <div className="risk-controls">
               <label>
                 Kelly
@@ -1725,7 +1757,7 @@ function PredictionView({ p, token, onSave }) {
 
           {!risk && !riskLoading && (
             <p className="muted small" style={{ marginTop: 6 }}>
-              Clique em "Calcular risco" para ver Kelly fracionado, limites e score de confiança.
+              Simulação informativa: não use como recomendação de aposta ou garantia de retorno.
             </p>
           )}
         </div>

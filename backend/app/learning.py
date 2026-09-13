@@ -18,9 +18,7 @@ Métricas:
 from __future__ import annotations
 
 import math
-import threading
 from collections import deque
-from datetime import datetime
 
 from . import db
 from .feature_engine import compute_team_stats, compute_match_stats
@@ -160,6 +158,7 @@ def calibrate_league(league_id: int) -> dict | None:
 
     # Atualizar schema: adicionar coluna rho se não existir
     _ensure_rho_column()
+    _ensure_bayesian_columns()
 
     db.run_exec(
         "INSERT INTO league_models(league_id,home_advantage,window,feature,rho,accuracy,brier,"
@@ -197,6 +196,39 @@ def _ensure_rho_column() -> None:
         pass  # coluna já existe ou outro erro tolerável
 
 
+def _ensure_bayesian_columns() -> None:
+    """Adiciona colunas bayesian/method à league_models se não existirem (FASE 13)."""
+    try:
+        if db.MODE == "sqlite":
+            cols = [r[1] for r in db.run_query("PRAGMA table_info(league_models)")]
+            if "bayesian" not in cols:
+                db.run_exec("ALTER TABLE league_models ADD COLUMN bayesian INTEGER DEFAULT 0")
+            if "method" not in cols:
+                db.run_exec("ALTER TABLE league_models ADD COLUMN method TEXT DEFAULT 'poisson'")
+        else:
+            db.run_exec(
+                "ALTER TABLE league_models ADD COLUMN IF NOT EXISTS bayesian INTEGER DEFAULT 0")
+            db.run_exec(
+                "ALTER TABLE league_models ADD COLUMN IF NOT EXISTS method TEXT DEFAULT 'poisson'")
+    except Exception:
+        pass  # colunas já existem ou outro erro tolerável
+
+
+def _ensure_context_columns() -> None:
+    """Adiciona colunas ctx_*/contexto à league_models (FASE 14, FEATURE-001)."""
+    try:
+        if db.MODE == "sqlite":
+            cols = [r[1] for r in db.run_query("PRAGMA table_info(league_models)")]
+            for c in ("ctx_rest", "ctx_form", "ctx_team_ha"):
+                if c not in cols:
+                    db.run_exec(f"ALTER TABLE league_models ADD COLUMN {c} INTEGER DEFAULT 0")
+        else:
+            for c in ("ctx_rest", "ctx_form", "ctx_team_ha"):
+                db.run_exec(f"ALTER TABLE league_models ADD COLUMN IF NOT EXISTS {c} INTEGER DEFAULT 0")
+    except Exception:
+        pass  # colunas já existem ou outro erro tolerável
+
+
 def calibrate_all() -> dict:
     """Calibra todas as ligas com dados suficientes."""
     leagues = db.run_query(
@@ -221,16 +253,21 @@ def calibrate_all() -> dict:
 
 def get_model(league_id: int) -> dict:
     """Parâmetros calibrados da liga (fallback para xg/1.15/10/rho=0 sem calibração)."""
+    _ensure_bayesian_columns()
+    _ensure_context_columns()
     rows = db.run_query("SELECT * FROM league_models WHERE league_id=?", (league_id,))
     if not rows:
         return {"league_id": league_id, "home_advantage": 1.15, "window": 10,
                 "feature": "xg", "rho": 0.0, "accuracy": None, "brier": None,
-                "sample_count": 0, "calibrated_at": None}
+                "sample_count": 0, "calibrated_at": None,
+                "bayesian": 0, "method": "poisson"}
     d = dict(rows[0])
     d["home_advantage"] = float(d.get("home_advantage") or 1.15)
     d["window"] = int(d.get("window") or 10)
     d["feature"] = d.get("feature") or "xg"
     d["rho"] = float(d.get("rho") or 0.0)
+    d["bayesian"] = int(d.get("bayesian") or 0)
+    d["method"] = d.get("method") or ("bayesian" if d["bayesian"] else "poisson")
     return d
 
 
@@ -293,73 +330,35 @@ def motor_curve(buckets: int = 20) -> dict:
             "total_played": sum(weights), "total_leagues": len(per_league)}
 
 
-_cal_state = {
-    "lock": threading.Lock(),
-    "running": False,
-    "done": 0,
-    "total": 0,
-    "current": "",
-    "results": [],
-    "skipped": [],
-    "started_at": None,
-    "finished_at": None,
-}
-
-
-def _run_calibration_job() -> None:
-    try:
-        leagues = db.run_query(
-            "SELECT l.id, l.name, "
-            f" {_PLAYED_COUNT.format(alias='l')} AS played "
-            "FROM leagues l ORDER BY l.name")
-        with _cal_state["lock"]:
-            _cal_state.update(running=True, done=0, total=len(leagues), current="",
-                              results=[], skipped=[], started_at=datetime.now().isoformat(),
-                              finished_at=None)
-        for lg in leagues:
-            with _cal_state["lock"]:
-                _cal_state["current"] = lg["name"]
-            if lg["played"] < MIN_SAMPLES:
-                with _cal_state["lock"]:
-                    _cal_state["skipped"].append({"id": lg["id"], "name": lg["name"],
-                                                  "played": lg["played"]})
-            else:
-                try:
-                    r = calibrate_league(lg["id"])
-                except Exception as e:
-                    r = None
-                    with _cal_state["lock"]:
-                        _cal_state["skipped"].append({"id": lg["id"], "name": lg["name"],
-                                                      "played": lg["played"], "error": str(e)[:120]})
-                if r:
-                    with _cal_state["lock"]:
-                        _cal_state["results"].append({**r, "name": lg["name"]})
-            with _cal_state["lock"]:
-                _cal_state["done"] += 1
-    except Exception as e:
-        with _cal_state["lock"]:
-            _cal_state["error"] = str(e)[:200]
-    finally:
-        with _cal_state["lock"]:
-            _cal_state["running"] = False
-            _cal_state["current"] = ""
-            _cal_state["finished_at"] = datetime.now().isoformat()
-
-
-def start_calibration() -> dict:
-    with _cal_state["lock"]:
-        if _cal_state["running"]:
-            return {k: _cal_state[k] for k in ("running", "done", "total", "current")}
-        thread = threading.Thread(target=_run_calibration_job, daemon=True)
-        thread.start()
-    return calibration_status()
-
-
 def calibration_status() -> dict:
-    with _cal_state["lock"]:
-        return {k: _cal_state[k] for k in
-                ("running", "done", "total", "current", "results", "skipped",
-                 "started_at", "finished_at")}
+    """Read-only compatibility status backed by the durable jobs table."""
+    from . import jobs
+
+    recent = jobs.list_jobs(limit=10, job_type="calibrate_all")
+    recent.extend(jobs.list_jobs(limit=10, job_type="calibrate_league"))
+    recent.sort(key=lambda j: j.get("id", 0), reverse=True)
+    active = [j for j in recent if j.get("status") in ("pending", "running")]
+    last = recent[0] if recent else None
+    done = sum(int(j.get("progress") or 0) for j in recent)
+    total = max(len(recent), 1)
+    results = []
+    skipped = []
+    for j in recent:
+        results = results or []
+        if j.get("status") == "completed" and isinstance(j.get("result"), dict):
+            results.append(j["result"])
+        for s in (j.get("result") or {}).get("skipped", []) if isinstance(j.get("result"), dict) else []:
+            skipped.append(s) if s not in skipped else None
+    return {
+        "running": bool(active),
+        "done": done,
+        "total": total,
+        "current": active[0].get("parameters", "") if active else "",
+        "results": results,
+        "skipped": skipped[:200],
+        "started_at": last.get("started_at") if last else None,
+        "finished_at": last.get("finished_at") if last else None,
+    }
 
 def walkforward_validation(league_id: int, window: int = 10,
                           home_advantage: float = 1.15,

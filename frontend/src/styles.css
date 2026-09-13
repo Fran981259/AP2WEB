@@ -436,6 +436,9 @@ table.hist td { font-size: 12.5px; }
 .badge.error, .badge.wrong { background: rgba(248,113,113,.14); color: var(--danger); }
 .badge.running, .badge.pending { background: rgba(99,102,241,.16); color: var(--accent-hi); }
 .badge.tipo { background: var(--panel3); color: var(--muted); }
+.badge.method-bayesian { background: rgba(129,140,248,.15); color: #818cf8; border: 1px solid rgba(129,140,248,.3); }
+.badge.method-hybrid { background: rgba(251,191,36,.14); color: #fbbf24; border: 1px solid rgba(251,191,36,.3); }
+.badge.method-poisson { background: rgba(52,211,153,.13); color: var(--muted); border: 1px solid rgba(52,211,153,.25); }
 
 /* ---------- scrape ---------- */
 .scrape-page, .confronto-page { flex-direction: column; }
@@ -499,6 +502,25 @@ label.inline select:focus { outline: none; border-color: var(--accent); }
   gap: 10px;
 }
 .risk-header h4 { margin: 0; font-size: 14px; }
+.experimental-notice {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border-left: 3px solid #fbbf24;
+  border-radius: 4px;
+  background: rgba(251,191,36,.09);
+  color: #fcd34d;
+  font-size: 12px;
+}
+.experimental-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid rgba(251,191,36,.45);
+  border-radius: 999px;
+  color: #fcd34d;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
 .risk-controls {
   display: flex;
   align-items: center;

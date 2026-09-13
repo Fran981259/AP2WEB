@@ -11,48 +11,78 @@ Uso:
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-TABLES = ["users", "leagues", "teams", "matches", "predictions", "league_models"]
+# Parents must precede children so explicit IDs keep their references valid.
+TABLES = (
+    "users", "leagues", "teams", "matches", "predictions", "league_models",
+    "workers", "jobs", "auth_sessions", "audit_events",
+)
+ID_TABLES = frozenset({
+    "users", "leagues", "teams", "matches", "predictions", "jobs",
+    "auth_sessions", "audit_events",
+})
+
+
+def _open_source() -> sqlite3.Connection:
+    """Open an explicit SQLite source without changing PostgreSQL app config."""
+    default = Path(__file__).resolve().parent.parent / "ap2web.db"
+    source_path = Path(os.environ.get("AP2WEB_SQLITE_SOURCE_PATH", default))
+    if not source_path.is_file():
+        sys.exit(f"SQLite source not found: {source_path}")
+    source = sqlite3.connect(source_path)
+    source.row_factory = sqlite3.Row
+    return source
+
+
+def _truncate_destination(dst) -> None:
+    """Replace all migratable state, including tables empty in SQLite."""
+    quoted = ", ".join(f'"{table}"' for table in TABLES)
+    dst.execute(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+
+
+def _copy_table(src, dst, table: str) -> int:
+    exists = src.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    if not exists:
+        return 0
+    rows = src.execute(f"SELECT * FROM {table}").fetchall()
+    if not rows:
+        return 0
+    cols = list(rows[0].keys())
+    placeholders = ",".join("%s" for _ in cols)
+    collist = ",".join(f'"{column}"' for column in cols)
+    sql = f'INSERT INTO "{table}"({collist}) VALUES({placeholders})'
+    for row in rows:
+        dst.execute(sql, tuple(row[column] for column in cols))
+    if table in ID_TABLES:
+        dst.execute(
+            f"SELECT setval(pg_get_serial_sequence('{table}','id'), "
+            f"COALESCE((SELECT MAX(id) FROM \"{table}\"), 1))")
+    return len(rows)
 
 
 def main() -> None:
     if not os.environ.get("DATABASE_URL"):
         sys.exit("Defina DATABASE_URL apontando para o Postgres de destino.")
-    os.environ.pop("AP2WEB_DB_PATH", None)
-
     from app import db
     if db.MODE != "postgres":
         sys.exit("DATABASE_URL não reconhecida — modo ativo: " + db.MODE)
 
     import psycopg.rows  # noqa: F401 (garante registro do dict_row)
-    src = db.get_conn()
-    src.row_factory = __import__("sqlite3").Row
+    src = _open_source()
 
     db.init_db()  # cria schema no destino
     with db._pg_connect() as dst:
+        _truncate_destination(dst)
         for table in TABLES:
-            rows = src.execute(f"SELECT * FROM {table}").fetchall()
-            if not rows:
-                print(f"{table}: 0 linhas")
-                continue
-            cols = list(rows[0].keys())
-            dst.execute(f'DELETE FROM "{table}"')
-            placeholders = ",".join("%s" for _ in cols)
-            collist = ",".join(f'"{c}"' for c in cols)
-            sql = f'INSERT INTO "{table}"({collist}) VALUES({placeholders})'
-            for r in rows:
-                dst.execute(sql, tuple(r[c] for c in cols))
-            # resequencia as sequences após ids explícitos
-            pk = {"league_models": "league_id"}.get(table, "id")
-            if pk == "id":
-                dst.execute(
-                    f'SELECT setval(pg_get_serial_sequence(\'{table}\',\'id\'), '
-                    f'COALESCE((SELECT MAX(id) FROM "{table}"), 1))')
-            print(f"{table}: {len(rows)} linhas migradas")
+            copied = _copy_table(src, dst, table)
+            print(f"{table}: {copied} linhas migradas")
+    src.close()
     print("\n✅ Migração concluída.")
 
 

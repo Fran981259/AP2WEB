@@ -6,7 +6,7 @@ Executar após QUALQUER mudança cross-cutting (backend, front, schema, modelo):
 
 Fase A — API smoke: endpoints principais, auth, contrato, validade probabilística.
 Fase B — E2E browser real (selenium): login, sidebar, confronto, previsão,
-         navegação nas 5 abas, erros de console.
+         navegação nas abas do header, erros de console.
 
 Exit code: 0 = PASS, 1 = FAIL.
 Requer: backend em :8000 e frontend em :5173 rodando.
@@ -19,7 +19,8 @@ import urllib.request
 
 BASE = "http://localhost:8000/api"
 FRONT = "http://localhost:5173"
-USER = ("tester", "abc12345")
+import os as _os  # noqa: E402
+USER = (_os.environ.get("AP2WEB_TEST_USER", "tester"), _os.environ.get("AP2WEB_TEST_PASS", "rlcupicKR3&tLBnGUKly"))
 
 results = []
 
@@ -193,28 +194,42 @@ def phase_e2e(token):
                     "return Array.from(document.querySelectorAll('.bar-val')).map(e => e.textContent)")
                 check("painel de previsão renderiza probabilidades", len(bars) >= 3, f"{len(bars)} barras")
 
-        # navegar pelas 6 abas sem quebrar (Confronto..Sofascore + Evolução)
+        # navegar por todas as abas do header sem quebrar (Confronto..Backtest Engine)
         buttons = d.find_elements(By.CSS_SELECTOR, "header nav button")
         for b in buttons:
             b.click()
             time.sleep(1)
-        check("navegação nas 6 abas", len(buttons) == 6)
+        check("navegação nas abas do header", len(buttons) >= 6,
+              f"{len(buttons)} abas")
 
         # console sem erros severos (ignora favicon 404)
-        severe = [l["message"][:120] for l in d.get_log("browser")
-                  if l["level"] == "SEVERE" and "favicon" not in l["message"]]
+        severe = [entry["message"][:120] for entry in d.get_log("browser")
+                  if entry["level"] == "SEVERE" and "favicon" not in entry["message"]]
         check("console sem erros SEVERE", len(severe) == 0, "; ".join(severe[:3]))
     finally:
         d.quit()
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--phase", choices=["A", "B", "all"], default="all")
+    args = parser.parse_args()
+
     print("=" * 60)
     print("AP2WEB — SUÍTE DE REGRESSÃO (PROP-001)")
     print("=" * 60)
-    tok = phase_api()
-    if tok:
+
+    tok = None
+    if args.phase in ["A", "all"]:
+        tok = phase_api()
+
+    if tok and args.phase in ["B", "all"]:
         phase_e2e(tok)
+
+    if args.phase == "A" and not tok:
+        # If phase A failed to get token, exit 1
+        sys.exit(1)
 
     fails = [r for r in results if not r[1]]
     print("\n" + "=" * 60)

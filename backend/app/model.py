@@ -3,7 +3,7 @@
 Evolução do AP 2.0 com correções matemáticas rigorosas:
   - Dixon-Coles (1997): fator τ de dependência para placares baixos (0-0, 1-0, 0-1, 1-1)
   - Bayesian updating: priors Gamma → posteriores com observações de gols
-  - λs via modelo de regressão Poisson (attack/defense por time)
+  - λs via médias aritméticas de ataque/defesa por time (não regressão ajustada)
   - Matriz de probabilidades [i][j] = P(casa i gols, fora j gols) corrigida
 
 Referências:
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
 
 MAX_GOALS = 10
 GOAL_LINES = [1.5, 2.5, 3.5, 4.5]  # linhas padrão de over/under
@@ -24,9 +23,6 @@ def poisson_pmf(k: float, lam: float) -> float:
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
     return math.exp(-lam) * lam**k / math.factorial(int(k))
-
-
-PoissonPmf = float  # P(X=k) para um valor k, tipo do resultado de poisson_pmf
 
 
 @dataclass
@@ -42,15 +38,8 @@ class TeamInput:
 @dataclass
 class MatchInput:
     league: str = ""
-    home: TeamInput = field(default_factory=TeamInput)
-    away: TeamInput = field(default_factory=TeamInput)
-
-
-# Tipagem simplificada para dicionários de probabilidades (usado em retorno de funções)
-Probs1x2Types = dict[str, float]  # {"1": float, "X": float, "2": float}
-ProbsBttsTypes = dict[str, float]  # {"sim": float, "nao": float}
-ProbsOverTypes = dict[float, float]  # {1.5: float, 2.5: float, ...}
-ProbsScoresTypes = dict[str, float]  # {"1-0": float, ...}
+    home: TeamInput = field(default_factory=lambda: TeamInput(name=""))
+    away: TeamInput = field(default_factory=lambda: TeamInput(name=""))
 
 
 @dataclass
@@ -65,7 +54,7 @@ class PoissonResult:
 
 
 def compute_lambdas(home: TeamInput, away: TeamInput, home_advantage: float = 1.0) -> tuple[float, float]:
-    """λ casa/fora: média harmônica simples entre ataque próprio e defesa adversária.
+    """λ casa/fora: média aritmética entre ataque próprio e defesa adversária.
 
     λcasa = média(atk_casa, def_fora) * fator_mando
     λfora = média(atk_fora, def_casa)
@@ -96,39 +85,16 @@ def compute_lambdas(home: TeamInput, away: TeamInput, home_advantage: float = 1.
 
 def dixon_coles_tau(i: int, j: int, lam_home: float, lam_away: float,
                     rho: float) -> float:
-    """Fator de correção de dependência Dixon-Coles (1997).
-
-    Ajusta as probabilidades dos 4 placares de baixa pontuação para
-    modelar a correlação negativa entre gols do mandante e visitante:
-      - 0-0: empates tendem a ser mais frequentes que o Poisson puro prevê
-      - 1-0, 0-1: vitórias por 1 gol são subestimadas
-      - 1-1: empates 1-1 são subestimados
-
-    τ = 1 + ρ × Δ, onde Δ depende do placar:
-      P(0,0): Δ = 1 - λ_home × λ_away
-      P(1,0): Δ = 1 - (λ_home - 1) × λ_away
-      P(0,1): Δ = 1 - λ_home × (λ_away - 1)
-      P(1,1): Δ = 1 - (λ_home - 1) × (λ_away - 1)
-
-    ρ ∈ [-0.5, 0.5] — tipicamente ≈ -0.13 para futebol.
-    ρ < 0: gols negativamente correlacionados (mais 0-0, menos gols).
-    ρ = 0: modelo Poisson puro (independência).
-    """
-    if not (-0.5 <= rho <= 0.5):
-        rho = max(-0.5, min(0.5, rho))
-
+    """Canonical Dixon–Coles low-score factors (home i, away j)."""
     if i == 0 and j == 0:
-        delta = 1.0 - lam_home * lam_away
+        return 1.0 - lam_home * lam_away * rho
     elif i == 1 and j == 0:
-        delta = 1.0 - (lam_home - 1.0) * lam_away
+        return 1.0 + lam_away * rho
     elif i == 0 and j == 1:
-        delta = 1.0 - lam_home * (lam_away - 1.0)
+        return 1.0 + lam_home * rho
     elif i == 1 and j == 1:
-        delta = 1.0 - (lam_home - 1.0) * (lam_away - 1.0)
-    else:
-        return 1.0  # placares altos: sem correção
-
-    return 1.0 + rho * delta
+        return 1.0 - rho
+    return 1.0
 
 
 def build_matrix(lam_home: float, lam_away: float,
@@ -139,6 +105,13 @@ def build_matrix(lam_home: float, lam_away: float,
     Para ρ≠0, os 4 placares baixos (0-0, 1-0, 0-1, 1-1) são ajustados
     pelo fator τ, e a matriz é renormalizada.
     """
+    if not all(math.isfinite(v) for v in (lam_home, lam_away, rho)) or min(lam_home, lam_away) < 0:
+        raise ValueError("Lambdas must be finite and non-negative; rho must be finite")
+    # Project rho to its match-specific admissible interval so every tau >= 0.
+    # This is an explicit numerical policy, not a fitted Dixon–Coles regression.
+    lower = max((-1 / v for v in (lam_home, lam_away) if v > 0), default=-0.5)
+    upper = min(1.0, 1 / (lam_home * lam_away)) if lam_home * lam_away > 0 else 1.0
+    rho = max(lower, min(upper, rho))
     m = [[0.0] * (MAX_GOALS + 1) for _ in range(MAX_GOALS + 1)]
     total = 0.0
 

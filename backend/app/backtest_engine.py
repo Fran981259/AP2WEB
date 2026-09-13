@@ -1,9 +1,9 @@
-"""Backtest Engine — ciclo contínuo de backtest, meta-learning e re-treino.
+"""Backtest Engine — ciclos síncronos consumidos pelo worker de jobs.
 
 Componentes:
   1. TemporalCV: cross-validation temporal K-fold (zero leakage)
-  2. MetaLearner: Bayesian optimization via scikit-optimize
-  3. BacktestLoop: thread de background com ciclo completo
+   2. MetaLearner: sugestões heurísticas baseadas no histórico
+   3. BacktestLoop: execução de ciclo e leitura do histórico
 
 Fluxo por ciclo:
   1. Para cada liga com dados suficientes:
@@ -22,7 +22,6 @@ import json
 import math
 import os
 import threading
-import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,11 +255,7 @@ class MetaLearner:
             self._save()
 
     def suggest(self, league_id: int) -> list[dict]:
-        """Sugere combinações de hiperparâmetros baseado no histórico.
-
-        Usa Bayesian optimization (scikit-optimize) quando disponível,
-        senão usa análise heurística do histórico.
-        """
+        """Sugestões heurísticas; não executa otimização bayesiana."""
         # Filtra histórico relevante (mesma liga ou global)
         relevant = [h for h in self.history if h.get("league_id") == league_id]
         if not relevant:
@@ -269,10 +264,7 @@ class MetaLearner:
         if len(relevant) < 5:
             return self._grid_suggestions()
 
-        try:
-            return self._bayesian_suggestions(relevant)
-        except Exception:
-            return self._heuristic_suggestions(relevant)
+        return self._heuristic_suggestions(relevant)
 
     def _grid_suggestions(self) -> list[dict]:
         """Sugestões iniciais: grid coarse, mas já incorpora melhores resultados do histórico."""
@@ -337,78 +329,6 @@ class MetaLearner:
                         })
         return suggestions[:20]
 
-    def _bayesian_suggestions(self, history: list[dict]) -> list[dict]:
-        """Bayesian optimization via scikit-optimize."""
-        from skopt import gp_minimize
-        from skopt.space import Categorical, Real, Integer
-
-        space = [
-            Categorical(FEATURE_GRID, name="feature"),
-            Integer(3, 20, name="window"),
-            Real(1.0, 1.35, name="home_advantage"),
-            Real(-0.3, 0.0, name="rho"),
-        ]
-
-        # Converte histórico para X, y
-        X_train = []
-        y_train = []
-        for h in history:
-            X_train.append([
-                h["feature"],
-                h["window"],
-                h["home_advantage"],
-                h["rho"],
-            ])
-            y_train.append(h["brier"])  # minimizar Brier
-
-        if len(X_train) < 3:
-            return self._heuristic_suggestions(history)
-
-        # Mapeia feature para índice numérico para o gp_minimize
-        feature_map = {f: i for i, f in enumerate(FEATURE_GRID)}
-        X_numeric = []
-        for x in X_train:
-            X_numeric.append([
-                feature_map.get(x[0], 0),
-                x[1],
-                x[2],
-                x[3],
-            ])
-
-        def objective(params):
-            feature_idx, window, ha, rho = params
-            feature = FEATURE_GRID[int(feature_idx)]
-            # Procura no histórico
-            best_brier = 1.0
-            for h in history:
-                if (h["feature"] == feature and
-                    abs(h["window"] - window) <= 2 and
-                    abs(h["home_advantage"] - ha) < 0.05 and
-                    abs(h["rho"] - rho) < 0.05):
-                    best_brier = min(best_brier, h["brier"])
-            return best_brier
-
-        result = gp_minimize(
-            objective,
-            space,
-            n_calls=max(10, len(X_numeric) + 5),
-            n_initial_points=5,
-            random_state=42,
-            verbose=False,
-        )
-
-        suggestions = []
-        for x in result.x_iters:
-            feature_idx, window, ha, rho = x
-            suggestions.append({
-                "feature": FEATURE_GRID[int(feature_idx)],
-                "window": int(window),
-                "home_advantage": round(float(ha), 4),
-                "rho": round(float(rho), 4),
-            })
-
-        return suggestions
-
     def _heuristic_suggestions(self, history: list[dict]) -> list[dict]:
         """Sugestões heurísticas baseadas no histórico."""
         # Encontra melhores parâmetros já testados
@@ -442,13 +362,10 @@ class MetaLearner:
 # 3. BACKTEST LOOP (Background)
 # ---------------------------------------------------------------------------
 class BacktestLoop:
-    """Loop contínuo de backtest e meta-learning em background."""
+    """Executa ciclos síncronos; agendamento e cancelamento pertencem aos jobs."""
 
     def __init__(self):
-        self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._running = False
-        self._stop_event = threading.Event()
         self.state = {
             "running": False,
             "cycle_count": 0,
@@ -508,30 +425,6 @@ class BacktestLoop:
                 self.state["league_history"] = self.state["league_history"][-200:]
             self._save_state()
 
-    def start(self, interval_hours: float = 6) -> dict:
-        """Inicia o loop de backtest em background."""
-        with self._lock:
-            if self._running:
-                return {"status": "already_running", **self.state}
-            self._running = True
-            self._stop_event.clear()
-            self.state["running"] = True
-            self.state["interval_hours"] = interval_hours
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
-        return {"status": "started", "interval_hours": interval_hours}
-
-    def stop(self) -> dict:
-        """Para o loop de backtest."""
-        with self._lock:
-            if not self._running:
-                return {"status": "already_stopped"}
-            self._stop_event.set()
-            self._running = False
-            self.state["running"] = False
-            self.state["current_phase"] = "parado"
-        return {"status": "stopped"}
-
     def status(self) -> dict:
         """Retorna estado atual do loop."""
         with self._lock:
@@ -541,23 +434,13 @@ class BacktestLoop:
                 "league_history_count": len(self.state.get("league_history", [])),
             }
 
-    def run_single_cycle(self, league_ids: list[int] | None = None) -> dict:
-        """Executa um único ciclo de backtest (síncrono)."""
-        return self._execute_cycle(league_ids)
+    def _execute_cycle(self, league_ids: list[int] | None = None,
+                       progress_cb=None) -> dict:
+        """Executa um ciclo completo de backtest (síncrono).
 
-    def _run_loop(self):
-        """Loop principal de background."""
-        while not self._stop_event.is_set():
-            try:
-                self._execute_cycle()
-            except Exception as e:
-                with self._lock:
-                    self.state["current_phase"] = f"erro: {str(e)[:100]}"
-            # Espera até próximo ciclo ou stop
-            self._stop_event.wait(timeout=self.state["interval_hours"] * 3600)
-
-    def _execute_cycle(self, league_ids: list[int] | None = None) -> dict:
-        """Executa um ciclo completo de backtest."""
+        ``progress_cb(idx, total, league_id)`` is invoked per league so callers
+        (the job worker) can report progress and detect cancellation.
+        """
         cycle_start = datetime.now(timezone.utc).isoformat()
         results = []
 
@@ -579,6 +462,8 @@ class BacktestLoop:
             with self._lock:
                 self.state["current_league"] = lg["name"]
                 self.state["current_phase"] = f"backtest ({idx+1}/{total})"
+            if progress_cb is not None:
+                progress_cb(idx, total, lid)
 
             try:
                 result = self._backtest_league_meta(lid)
@@ -612,7 +497,6 @@ class BacktestLoop:
 
     def _backtest_league_meta(self, league_id: int) -> dict:
         """Backtest de uma liga com meta-learning, propostas e análise de erros."""
-        from .model import MatchInput, TeamInput, predict as run_predict
 
         # 1. Pega modelo atual
         current_model = get_model(league_id)
@@ -714,7 +598,6 @@ class BacktestLoop:
                            rho: float = 0.0) -> dict:
         """Backtest detalhado com análise de erros e propostas."""
         from .model import MatchInput, TeamInput, predict as run_predict
-        from .prediction import _build
 
         matches = db.run_query(
             "SELECT m.id, m.kickoff_datetime, m.home_team_id, m.away_team_id, "
@@ -991,9 +874,9 @@ class BacktestLoop:
                 "wrong": total_wrong,
                 "total": total_matches,
                 "leagues_count": len(leagues),
-                "evolved": sum(1 for l in leagues if l["trend"] == "evolution"),
-                "involved": sum(1 for l in leagues if l["trend"] == "involution"),
-                "stable": sum(1 for l in leagues if l["trend"] == "stable"),
+                "evolved": sum(1 for lg in leagues if lg["trend"] == "evolution"),
+                "involved": sum(1 for lg in leagues if lg["trend"] == "involution"),
+                "stable": sum(1 for lg in leagues if lg["trend"] == "stable"),
             },
             "proposals_summary": proposals_summary,
         }

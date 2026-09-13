@@ -114,20 +114,23 @@ def _resolve_fixture(p) -> tuple | None:
 def save_prediction(user_id, data: dict) -> dict:
     """data: {league_id, match_id?, home_team_id, away_team_id, home_name, away_name,
     match_date?, pick_type, pick_value, pick_label, prob, odd, payload, model_version, predicted_at}"""
-    model_version = data.get("model_version", "poisson_v2")
-    predicted_at = data.get("predicted_at") or datetime.now().isoformat(timespec="seconds")
-    
+    model_version = data.get("model_version") or data.get("league_model_version") or "poisson_v2"
+    predicted_at = data.get("predicted_at") or data.get("prediction_created_at") or datetime.now().isoformat(timespec="seconds")
     pid = db.run_exec(
         "INSERT INTO predictions(user_id,league_id,match_id,home_team_id,away_team_id,"
-        "home_name,away_name,match_date,pick_type,pick_value,pick_label,prob,odd,payload,model_version,predicted_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "home_name,away_name,match_date,pick_type,pick_value,pick_label,prob,odd,payload,model_version,model_method,feature_version,data_snapshot_timestamp,as_of_timestamp,training_window,training_sample_size,league_model_version,predicted_at,source_data_freshness,confidence_level,fallback_reason) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (user_id, data.get("league_id"), data.get("match_id"),
          data.get("home_team_id"), data.get("away_team_id"),
          data.get("home_name"), data.get("away_name"), data.get("match_date"),
          data.get("pick_type"), data.get("pick_value"), data.get("pick_label"),
          data.get("prob"), data.get("odd"),
          json.dumps(data.get("payload", {}), ensure_ascii=False),
-         model_version, predicted_at))
+         model_version, data.get("model_method"), data.get("feature_version"),
+         data.get("data_snapshot_timestamp"), data.get("as_of_timestamp"),
+         data.get("training_window"), data.get("training_sample_size"),
+         data.get("league_model_version"), predicted_at,
+         data.get("source_data_freshness"), data.get("confidence_level"), data.get("fallback_reason")))
     # resolve na hora se a partida já tiver resultado
     resolve_predictions(user_id)
     row = db.run_query("SELECT * FROM predictions WHERE id=?", (pid,))[0]
@@ -150,7 +153,7 @@ def list_predictions(user_id, limit: int = 200) -> list[dict]:
 def delete_prediction(user_id, prediction_id: int) -> bool:
     cur = db.run_exec(
         "DELETE FROM predictions WHERE id=? AND user_id=?", (prediction_id, user_id))
-    return cur is not None
+    return cur > 0
 
 
 def stats(user_id) -> dict:

@@ -9,28 +9,16 @@ Usa o mecanismo de HTTP do soccerdata (TLS impersonation → evita 403/CAPTCHA).
 from __future__ import annotations
 
 import json
-import threading
+import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-
-import soccerdata as sd
 
 from . import db
 from .feature_engine import parse_stat_value as _parse_score
 from .leagues_config import load_leagues
 
-_state: dict = {
-    "running": False,
-    "done": 0,
-    "total": 0,
-    "current": "",
-    "ok": 0,
-    "fail": 0,
-    "errors": [],
-    "finished_at": None,
-    "error": None,
-}
+logger = logging.getLogger("ap2web.sofascore")
 
 # Mapeamento de nomes de estatísticas do Sofascore → colunas internas do banco
 # Construído a partir de _STAT_COLS para garantir consistência
@@ -101,6 +89,9 @@ _STAT_COLS = {
 
 def _client():
     """Instância do soccerdata.Sofascore (mecanismo de HTTP com TLS impersonation)."""
+    # Import lazily: soccerdata configures filesystem logging at import time.
+    # API startup and tests should not require the scraper's external runtime.
+    import soccerdata as sd
     return sd.Sofascore(leagues="ENG-Premier League", seasons="2026")
 
 
@@ -145,7 +136,8 @@ def _latest_season(tournament_id: int) -> tuple[int, str] | None:
             rounds_data = _fetch(
                 f"https://www.sofascore.com/api/v1/unique-tournament/{tournament_id}/season/{sid}/rounds",
                 Path(f"/tmp/sofa_rounds_{tournament_id}_{sid}.json"))
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError, KeyError, Exception) as e:  # noqa: BLE001 — network upstream, log explicitly
+            logger.warning("rounds fetch failed tid=%s sid=%s err=%s", tournament_id, sid, e)
             time.sleep(1)
             continue
         if not rounds_data.get("rounds"):
@@ -160,7 +152,8 @@ def _latest_season(tournament_id: int) -> tuple[int, str] | None:
             played = any(
                 (e.get("status") or {}).get("code") == 100
                 for e in ev_data.get("events", []))
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError, KeyError, Exception) as e:  # noqa: BLE001
+            logger.debug("events/last check failed sid=%s err=%s", sid, e)
             played = False
         if played:
             return sid, s.get("name")
@@ -208,7 +201,6 @@ def _upsert_match(league_id: int, event: dict) -> bool:
     ts = event.get("startTimestamp")
     round_no = (event.get("roundInfo") or {}).get("round")
 
-    from datetime import datetime, timezone
     koff = None
     if ts is not None:
         koff = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
@@ -253,23 +245,24 @@ def _upsert_match(league_id: int, event: dict) -> bool:
                     url = f"https://www.sofascore.com/api/v1/event/{eid}/statistics"
                     raw = _fetch(url, Path(f"/tmp/sofa_ev_{eid}_postsync.json"))
                     st = _extract_stats(raw)
-                    # Atualizar apenas as stats que estavam faltando
+                    # Update columns directly. This path handles a match that
+                    # was scheduled at first sync and later becomes played.
                     update_vals = {}
-                    for key in _STAT_COLS.keys():
-                        if key in st and (existing.get(f"{key}_home") is None or existing.get(f"{key}_away") is None):
-                            # Atualizar só se estava faltando
-                            if existing.get(f"{key}_home") is None:
-                                update_vals[f"{key}_home"] = (st.get(key) or {}).get("home")
-                            if existing.get(f"{key}_away") is None:
-                                update_vals[f"{key}_away"] = (st.get(key) or {}).get("away")
+                    for key, column in _STAT_COLS.items():
+                        home_col, away_col = f"{column}_home", f"{column}_away"
+                        if key in st and (existing.get(home_col) is None or existing.get(away_col) is None):
+                            if existing.get(home_col) is None:
+                                update_vals[home_col] = st[key].get("home")
+                            if existing.get(away_col) is None:
+                                update_vals[away_col] = st[key].get("away")
                     
                     if update_vals:
-                        set_clause = ", ".join(f"{c}=excluded.{c}" for c in update_vals.keys())
+                        set_clause = ", ".join(f"{column}=?" for column in update_vals)
                         db.run_exec(
                             f"UPDATE matches SET {set_clause} WHERE id=?",
-                            [list(update_vals.values()), exists[0]["id"]])
-                except Exception as e:
-                    # Log error but don't fail the sync
+                            tuple(update_vals.values()) + (exists[0]["id"],))
+                except (OSError, ValueError, KeyError, Exception) as e:  # noqa: BLE001
+                    logger.warning("post-sync stats fetch eid=%s err=%s", eid, e, exc_info=True)
                     pass
         
         return False
@@ -288,7 +281,6 @@ def _upsert_match(league_id: int, event: dict) -> bool:
     # BASE.md §314-344: timestamp completo deve ser armazenado, não apenas data
     koff = None
     if ts is not None:
-        from datetime import datetime, timezone
         koff = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     # match_date mantido para compatibilidade (apenas a data)
     # extrair data de koff (ISO UTC) ou None
@@ -434,57 +426,64 @@ def sync_league_local(league_id: int) -> dict:
     return sync_league(cfg)
 
 
-def _run_sync() -> None:
-    global _state
-    leagues = load_leagues()
-    with threading.Lock():
-        _state.update(running=True, done=0, total=len(leagues), current="",
-                      ok=0, fail=0, errors=[], finished_at=None, error=None)
-    for cfg in leagues:
-        _state["current"] = cfg["name"]
-        try:
-            r = sync_league(cfg)
-            if r["ok"]:
-                _state["ok"] += 1
-            else:
-                _state["fail"] += 1
-                _state["errors"].append({"league": cfg["name"], "error": r.get("error")})
-        except Exception as e:  # noqa: BLE001
-            _state["fail"] += 1
-            _state["errors"].append({"league": cfg["name"], "error": str(e)[:200]})
-        _state["done"] += 1
-    _state["running"] = False
-    _state["current"] = ""
-    _state["finished_at"] = datetime.now().isoformat(timespec="seconds")
-
-
-def start_sync() -> dict:
-    global _state
-    if _state["running"]:
-        return {"ok": False, "error": "Sincronização já em andamento"}
-    t = threading.Thread(target=_run_sync, daemon=True)
-    t.start()
-    return {"ok": True, "started": True}
-
-
 def status() -> dict:
-    return dict(_state)
+    """Read-only compatibility status backed by the durable jobs table.
+
+    No thread/daemon state is used. Contract keys kept for old callers.
+    """
+    from . import jobs
+
+    recent = jobs.list_jobs(limit=10, job_type="sync_all")
+    recent.extend(jobs.list_jobs(limit=10, job_type="sync_league"))
+    recent.sort(key=lambda j: j.get("id", 0), reverse=True)
+    active = [j for j in recent if j.get("status") in ("pending", "running")]
+    completed = [j for j in recent if j.get("status") == "completed"]
+    total = max(len(recent), 1)
+    last = recent[0] if recent else None
+    return {
+        "running": bool(active),
+        "done": len(completed),
+        "total": total,
+        "current": active[0].get("parameters", "") if active else "",
+        "ok": len(completed),
+        "fail": sum(1 for j in recent if j.get("status") == "failed"),
+        "errors": [{"job_id": j["id"], "error": j.get("error_message")}
+                   for j in recent if j.get("status") == "failed"],
+        "finished_at": last.get("finished_at") if last else None,
+        "error": last.get("error_message") if last and last.get("status") == "failed" else None,
+    }
 
 
-def dataset(league_id: int | None = None, limit: int = 2000) -> list[dict]:
-    """Lista os jogos (com stats) do banco, opcionalmente filtrado por liga."""
+def dataset(league_id: int | None = None, limit: int = 2000,
+            next_round: bool = False) -> list[dict]:
+    """Lista os jogos (com stats) do banco, opcionalmente filtrado por liga.
+
+    `next_round=True` → apenas a próxima rodada agendada de cada liga
+    (menor round com jogos futuros; por isso a seleção é por liga).
+    """
     q = ("SELECT m.*, th.name AS home, ta.name AS away, l.name AS league_name "
          "FROM matches m "
          "JOIN teams th ON th.id=m.home_team_id "
          "JOIN teams ta ON ta.id=m.away_team_id "
          "JOIN leagues l ON l.id=m.league_id ")
-    params: tuple = ()
+    conds: list[str] = []
+    params: list = []
     if league_id:
-        q += "WHERE m.league_id=? "
-        params = (league_id,)
-    q += "ORDER BY m.kickoff_datetime DESC, m.id LIMIT ?"
-    params += (limit,)
-    return [dict(r) for r in db.run_query(q, params)]
+        conds.append("m.league_id=?")
+        params.append(league_id)
+    if next_round:
+        conds.append("m.kickoff_datetime >= datetime('now')")
+        conds.append(
+            "m.round = (SELECT MIN(m2.round) FROM matches m2 "
+            "WHERE m2.league_id=m.league_id AND m2.status='scheduled' "
+            "AND m2.kickoff_datetime >= datetime('now') "
+            "AND m2.round IS NOT NULL)")
+    if conds:
+        q += "WHERE " + " AND ".join(conds) + " "
+    q += "ORDER BY m.kickoff_datetime {}, m.id LIMIT ?".format(
+        "ASC" if next_round else "DESC")
+    params.append(limit)
+    return [dict(r) for r in db.run_query(q, tuple(params))]
 
 
 def leagues() -> list[dict]:

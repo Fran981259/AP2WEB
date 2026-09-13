@@ -20,6 +20,7 @@ from xgboost import XGBClassifier
 
 from . import db
 from .learning import _team_lambdas, _predict_probs
+from .feature_engine import compute_match_stats
 
 LABELS = ("1", "X", "2")
 MIN_HISTORY = 5          # mínimo de jogos de CADA time para avaliar um confronto
@@ -141,8 +142,12 @@ def compare_models(league_id: int, window: int = WINDOW,
         if i < MIN_HISTORY * 2:
             continue
         # ── Poisson: mesmo histórico, mesmo instante ──
-        hl = _team_lambdas(row["hist_home"], window, "blend")
-        al = _team_lambdas(row["hist_away"], window, "blend")
+        def selected(history):
+            return [compute_match_stats({"score_home": h["gf"], "score_away": h["ga"],
+                                         "xg_home": h["xgf"], "xg_away": h["xga"]}, "blend")
+                    for h in reversed(history)]
+        hl = _team_lambdas(selected(row["hist_home"]), window, "blend")
+        al = _team_lambdas(selected(row["hist_away"]), window, "blend")
         poi = _predict_probs(
             {"gf_avg": hl.get("gf_avg", 1.2), "ga_avg": hl.get("ga_avg", 1.2)},
             {"gf_avg": al.get("gf_avg", 1.2), "ga_avg": al.get("ga_avg", 1.2)},
