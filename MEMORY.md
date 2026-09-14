@@ -35,13 +35,15 @@ Last updated: 2026-09-13
 - SQLite-to-PostgreSQL rehearsal passed in Docker Compose on 2026-09-13: all ten migrated table counts matched (3 users, 68 leagues and zero historical operational rows); worker was recreated and its PostgreSQL heartbeat verified.
 - Post-migration HTTP registration and login passed in Compose for `dockercheck2026`, confirming API writes and sessions against PostgreSQL with Redis rate limiting enabled.
 - PostgreSQL backup/restore rehearsal passed in Compose on 2026-09-13 via `scripts/verify_pg_backup_restore.sh`; dump `artifacts/ap2web-20260913T221425Z.dump` restored with matching application-table counts.
+- Railway production deployment passed on 2026-09-13: API, Redis, PostgreSQL and standalone worker are online; public `/api/ready` returned all checks true including durable worker heartbeat.
+- Approved local SQLite data was migrated to Railway PostgreSQL on 2026-09-13; API and worker readiness were revalidated afterward.
+- UptimeRobot monitoring was configured on 2026-09-13 for `/api/health` and `/api/ready` at five-minute intervals with e-mail alerts.
 
 ## Remaining Gates
 
-1. Provision and homologate Railway API, worker, PostgreSQL and Redis services; configure production secrets and monitoring/alerting.
-2. Establish a versioned historical snapshot, frozen holdout, calibration curves and confidence intervals before evaluating experimental paths.
-3. Supply real bookmaker odds before enabling value-bet or risk recommendations.
-4. Remove legacy aggregate status endpoints only after confirming no external consumers depend on them.
+1. Establish a versioned historical snapshot, frozen holdout, calibration curves and confidence intervals before evaluating experimental paths.
+2. Supply real bookmaker odds before enabling value-bet or risk recommendations.
+3. Remove legacy aggregate status endpoints only after confirming no external consumers depend on them.
 
 ## Canonical Documents
 

@@ -25,13 +25,13 @@ Legend: `[x]` verified, `[~]` implemented but not fully verified, `[ ]` pending.
 - [x] PostgreSQL/Redis connectivity and durable worker heartbeat were verified in Docker Compose on 2026-09-13.
 - [x] SQLite-to-PostgreSQL migration covers operational tables and has local unit coverage.
 - [x] SQLite-to-PostgreSQL migration rehearsal passed in Docker Compose on 2026-09-13; source and destination counts matched.
+- [x] Approved local SQLite data migrated to Railway PostgreSQL on 2026-09-13; worker heartbeat and public readiness passed afterward.
 - [x] Post-migration API registration and cookie-session login passed against Compose PostgreSQL/Redis on 2026-09-13.
 - [x] PostgreSQL backup and isolated restore passed in Compose on 2026-09-13; application-table counts matched.
-- [ ] Railway deploy has API, worker, PostgreSQL and Redis provisioned together.
-- [~] Backup and restore were tested in Compose; production monitoring and alerting remain pending.
+- [x] Railway API, worker, PostgreSQL and Redis were provisioned and `/api/ready` passed with a worker heartbeat on 2026-09-13.
+- [x] Backup and restore were tested in Compose; UptimeRobot monitors `/api/health` and `/api/ready` every five minutes with e-mail alerts.
 
 ## Completion Gate
 
-The remaining runtime gates are a SQLite-to-PostgreSQL migration rehearsal and
-deployment operational checks. Experimental model paths remain non-promoted
-until the protocol in `PROTOCOLO-AVALIACAO-CIENTIFICA.md` passes.
+Runtime deployment gates are verified. Experimental model paths remain
+non-promoted until the protocol in `PROTOCOLO-AVALIACAO-CIENTIFICA.md` passes.
