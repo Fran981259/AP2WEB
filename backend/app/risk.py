@@ -150,12 +150,15 @@ def risk_for_match(match_id: int, config: RiskConfig | None = None,
     mkt = market_for_match(match_id, as_of, market=market_odds)
     probs = mkt["probs"]
     fair = mkt["fair_odds"]
-    mkt_odds = mkt["market_odds"]
-    ev = mkt["ev"]
+    mkt_odds = mkt["market_odds"] or {}
+    ev = mkt["ev"] or {}
+    market_available = bool(mkt["market_available"])
 
     # Kelly fracionado para cada outcome
     kelly_adj = {}
     for k in OUTCOMES:
+        if not market_available:
+            continue
         kelly_adj[k] = kelly_fraction(probs[k], mkt_odds[k], cfg.kelly_fraction)
 
     # Limites de exposição
@@ -166,6 +169,10 @@ def risk_for_match(match_id: int, config: RiskConfig | None = None,
     # Sinais de value bet
     signals = []
     for k in OUTCOMES:
+        # Fair/model odds are not executable market prices. Without a validated
+        # external quote there is no EV, Kelly stake, or value-bet signal.
+        if not market_available:
+            continue
         edge = ev[k]  # EV = p × odds - 1
         kelly_val = kelly_adj.get(k, 0)
         stake_suggested = round(kelly_val * cfg.bankroll, 2) if kelly_val > 0 else 0.0
@@ -215,6 +222,8 @@ def risk_for_match(match_id: int, config: RiskConfig | None = None,
             "max_odds": cfg.max_odds,
         },
         "market": {
+            "market_available": market_available,
+            "market_quote": mkt.get("market_quote"),
             "probs": mkt["probs"],
             "fair_odds": mkt["fair_odds"],
             "market_odds": mkt["market_odds"],

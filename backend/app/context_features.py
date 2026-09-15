@@ -132,7 +132,7 @@ def _team_gd_avg(league_id: int, team_id: int, window: int = 5,
     query = (
         "SELECT score_home, score_away, home_team_id, kickoff_datetime FROM matches "
         "WHERE league_id=? AND (home_team_id=? OR away_team_id=?) "
-        "AND status='played' AND score_home IS NOT NULL"
+        "AND status='played' AND score_home IS NOT NULL AND score_away IS NOT NULL"
     )
     params = [league_id, team_id, team_id]
     if as_of:
@@ -181,7 +181,7 @@ def _team_ppg(league_id: int, team_id: int, as_home: bool,
     query = (
         f"SELECT score_home, score_away FROM matches "
         f"WHERE league_id=? AND {where} AND status='played' "
-        "AND score_home IS NOT NULL"
+        "AND score_home IS NOT NULL AND score_away IS NOT NULL"
     )
     params = [league_id, team_id]
     if as_of:

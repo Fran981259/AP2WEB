@@ -79,6 +79,8 @@ class Settings:
             env.get("AP2WEB_WORKER_HEARTBEAT_SECONDS"), 10, lo=2, hi=60)
         self.worker_lease_seconds: int = _as_int(
             env.get("AP2WEB_WORKER_LEASE_SECONDS"), 60, lo=10, hi=600)
+        self.source_sync_max_age_seconds: int = _as_int(
+            env.get("AP2WEB_SOURCE_SYNC_MAX_AGE_SECONDS"), 86_400, lo=60, hi=2_592_000)
 
         self.cookie_secure: bool = _as_bool(
             env.get("AP2WEB_COOKIE_SECURE"), default=(self.env == "production")
@@ -140,6 +142,7 @@ class Settings:
         if self.rate_limit_storage not in ("memory", "redis"):
             self.rate_limit_storage = "memory"
         self.redis_url: str = (env.get("AP2WEB_REDIS_URL") or "").strip()
+        self.the_odds_api_key: str = (env.get("THE_ODDS_API_KEY") or "").strip()
 
         # Comma-separated CIDRs considered "trusted proxies". The value of the
         # X-Forwarded-For header is only honored when the immediate TCP peer is

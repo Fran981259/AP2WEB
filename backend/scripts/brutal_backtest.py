@@ -49,7 +49,7 @@ def backtest_league_production(league_id: int, league_name: str) -> dict:
         "JOIN teams ta ON ta.id=m.away_team_id "
         "WHERE m.league_id=? AND m.status='played' "
         "  AND m.home_team_id IS NOT NULL AND m.away_team_id IS NOT NULL "
-        "  AND m.score_home IS NOT NULL "
+        "  AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL "
         "  AND m.kickoff_datetime IS NOT NULL AND m.kickoff_datetime != '' "
         "  AND m.kickoff_datetime <= datetime('now') "
         "ORDER BY m.kickoff_datetime, m.id", (league_id,))

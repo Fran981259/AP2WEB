@@ -23,7 +23,7 @@ class _Destination:
 
 
 def test_migration_plan_includes_operational_tables():
-    assert {"workers", "jobs", "auth_sessions", "audit_events"} <= set(migration.TABLES)
+    assert {"workers", "jobs", "auth_sessions", "audit_events", "execution_events"} <= set(migration.TABLES)
     assert "schema_migrations" not in migration.TABLES
     dst = _Destination()
     migration._truncate_destination(dst)
@@ -44,6 +44,18 @@ def test_copy_table_preserves_explicit_ids_and_resets_sequence():
     assert migration._copy_table(src, dst, "users") == 1
     assert dst.calls[0][1] == (7, "alice")
     assert 'INSERT INTO "users"("id","username")' in dst.calls[0][0]
+    assert "setval" in dst.calls[1][0]
+
+
+def test_copy_execution_events_resets_its_sequence():
+    src = sqlite3.connect(":memory:")
+    src.row_factory = sqlite3.Row
+    src.execute("CREATE TABLE execution_events (id INTEGER, execution_id TEXT)")
+    src.execute("INSERT INTO execution_events VALUES (9, 'execution-1')")
+    dst = _Destination()
+
+    assert migration._copy_table(src, dst, "execution_events") == 1
+    assert dst.calls[0][1] == (9, "execution-1")
     assert "setval" in dst.calls[1][0]
 
 

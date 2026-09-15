@@ -109,6 +109,49 @@ def test_worker_heartbeat_and_job_lease_are_durable():
     assert jobs.worker_healthy(5) is False
 
 
+def test_sync_job_renews_short_lease_during_league_work(monkeypatch):
+    u = _admin_user()
+    job = jobs.create_job("sync_all", requested_by=u["user_id"], parameters={"lease": "short"})
+    calls = []
+    renewals = []
+
+    original_renew = jobs.renew_job_lease
+
+    def renew(job_id, worker_id, lease_seconds=60):
+        renewals.append((job_id, worker_id, lease_seconds))
+        return original_renew(job_id, worker_id, lease_seconds)
+
+    monkeypatch.setattr("backend.app.sofascore_data.load_leagues", lambda: [{"name": "Test", "id": 1}])
+    monkeypatch.setattr(jobs, "renew_job_lease", renew)
+
+    def sync(cfg, heartbeat=None):
+        assert heartbeat is not None
+        heartbeat()
+        calls.append(cfg["id"])
+        return {"ok": True}
+
+    monkeypatch.setattr("backend.app.sofascore_data.sync_league", sync)
+    jobs._run_one(job, worker_id="short-lease-worker", lease_seconds=1)
+
+    assert calls == [1]
+    assert len(renewals) >= 2
+    assert all(renewal[2] == 1 for renewal in renewals)
+    assert jobs.get_job(job["id"])["status"] == "completed"
+
+
+def test_sync_league_is_blocked_while_sync_all_is_active():
+    u = _admin_user()
+    full = jobs.create_job("sync_all", requested_by=u["user_id"], parameters={"admission": 1})
+    assert jobs.claim_job(full["id"], "full-sync-worker") is True
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Full sync already active"):
+        jobs.create_job("sync_league", requested_by=u["user_id"], league_id=12345,
+                        parameters={"admission": 1})
+    jobs.complete_job(full["id"], {})
+
+
 def test_completed_job_can_be_repeated():
     u = _admin_user()
     first = jobs.create_job("health", requested_by=u["user_id"], parameters={"repeat": 1})

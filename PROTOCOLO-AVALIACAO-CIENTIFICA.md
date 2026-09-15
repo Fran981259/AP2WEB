@@ -13,10 +13,11 @@ Nenhuma metrica de desempenho, calibracao ou recomendacao de mercado e publicada
 
 ## Comparacao e metricas
 
-1. Comparar contra bases explicitas: frequencia da liga e Poisson simples.
+1. Comparar, nas mesmas partidas pontuadas pelo candidato, contra frequencia 1X2 empirica da liga (somente historico anterior) e Poisson independente neutro fixo (`lambda_casa=1,2`, `lambda_fora=1,2`, `rho=0`), que nao e o modelo candidato.
 2. Medir log loss, Brier multiclass, RPS e calibracao por classe para 1X2; reportar tamanho amostral e intervalos bootstrap.
 3. Separar desempenho por liga, temporada e faixa de confianca; resultados agregados nao substituem estratos com baixa amostra.
 4. Para mercados, tratar odds como dado temporal: registrar timestamp, fonte e fechamento. Nao inferir valor sem odds disponiveis antes do kickoff.
+5. No holdout, baselines usam somente o desenvolvimento como historico; o relatorio compara metricas, sem selecionar ou promover modelos.
 
 ## Promocao
 

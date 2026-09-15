@@ -34,7 +34,7 @@ FEATURE_GRID = ["xg", "goals", "blend"]  # features disponíveis para calibraç�
 
 _PLAYED_COUNT = (
     "(SELECT COUNT(*) FROM matches m WHERE m.league_id={alias}.id "
-    "AND m.status='played' AND m.score_home IS NOT NULL)"
+    "AND m.status='played' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL)"
 )
 
 def _team_lambdas(history: deque, window: int, feature: str) -> dict:
@@ -71,12 +71,26 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
         "SELECT m.id, m.kickoff_datetime, m.home_team_id, m.away_team_id, "
         "       m.xg_home, m.xg_away, m.score_home, m.score_away "
         "FROM matches m "
-        "WHERE m.league_id=? AND m.status='played' "
+        "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL "
         "  AND m.home_team_id IS NOT NULL AND m.away_team_id IS NOT NULL "
-        "ORDER BY m.kickoff_datetime, m.id", (league_id,))
+         "ORDER BY m.kickoff_datetime, m.id", (league_id,))
     if len(matches) < MIN_SAMPLES:
         return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0, "correct": 0, "total": len(matches),
-                "series": []}
+                "series": [], "predictions": []}
+    return backtest_completed_matches(matches, home_adv, window, feature, rho)
+
+
+def backtest_completed_matches(matches, home_adv: float = 1.15, window: int = 10,
+                               feature: str = "xg", rho: float = 0.0,
+                               evaluation_start: int = 0) -> dict:
+    """Backtest completed rows without querying the database.
+
+    ``evaluation_start`` leaves earlier rows available as history while scoring
+    only rows at or after that offset. It supports an honest final holdout.
+    """
+    matches = sorted(matches, key=lambda m: (m["kickoff_datetime"], m["id"]))
+    if evaluation_start < 0 or evaluation_start > len(matches):
+        raise ValueError("evaluation_start must be within the completed rows")
 
     hist: dict[int, deque] = {}
     correct = 0
@@ -84,39 +98,43 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
     logloss_sum = 0.0
     total = 0
     series = []
+    predictions = []
 
-    for m in matches:
-        hid, aid = m["home_team_id"], m["away_team_id"]
-        hh = hist.get(hid)
-        ah = hist.get(aid)
-        if hh is not None and ah is not None and len(hh) > 0 and len(ah) > 0:
-            home_l = _team_lambdas(hh, window, feature)
-            away_l = _team_lambdas(ah, window, feature)
-            p = _predict_probs(home_l, away_l, home_adv, rho)
-            actual = "1" if m["score_home"] > m["score_away"] else (
-                "X" if m["score_home"] == m["score_away"] else "2")
-            fav = max(p, key=p.get)
-            hit = int(fav == actual)
-            correct += hit
+    index = 0
+    while index < len(matches):
+        kickoff = matches[index]["kickoff_datetime"]
+        batch = []
+        while index < len(matches) and matches[index]["kickoff_datetime"] == kickoff:
+            batch.append(matches[index])
+            index += 1
+        # Fixtures at one kickoff are simultaneous: score every one before
+        # their outcomes enter the history used by any other fixture.
+        for batch_index, m in enumerate(batch, start=index - len(batch)):
+            if batch_index < evaluation_start:
+                continue
+            hid, aid = m["home_team_id"], m["away_team_id"]
+            hh, ah = hist.get(hid), hist.get(aid)
+            if hh is None or ah is None or not hh or not ah:
+                continue
+            p = _predict_probs(_team_lambdas(hh, window, feature),
+                               _team_lambdas(ah, window, feature), home_adv, rho)
+            actual = "1" if m["score_home"] > m["score_away"] else ("X" if m["score_home"] == m["score_away"] else "2")
+            correct += int(max(p, key=p.get) == actual)
             brier_sum += (1 - p[actual]) ** 2 + sum(p[k] ** 2 for k in p if k != actual)
             logloss_sum += -math.log(max(p[actual], 1e-10))
             total += 1
             series.append((total, correct / total * 100))
-        # Usar Feature Engine para stats da partida (unificado com prediction.py)
-        gm = compute_match_stats({
-            "score_home": m["score_home"],
-            "score_away": m["score_away"],
-            "xg_home": m["xg_home"],
-            "xg_away": m["xg_away"],
-        }, feature)
-        gh, ga = gm["gf"], gm["ga"]
-        hh = hist.setdefault(hid, deque(maxlen=window))
-        ah = hist.setdefault(aid, deque(maxlen=window))
-        hh.appendleft({"gf": gh, "ga": ga})
-        ah.appendleft({"gf": ga, "ga": gh})
+            # Keep only the evaluation facts needed for reproducible scoring.
+            predictions.append({"match_id": m["id"], "actual": actual, "probabilities": dict(p)})
+        for m in batch:
+            hid, aid = m["home_team_id"], m["away_team_id"]
+            gm = compute_match_stats({"score_home": m["score_home"], "score_away": m["score_away"], "xg_home": m["xg_home"], "xg_away": m["xg_away"]}, feature)
+            hist.setdefault(hid, deque(maxlen=window)).appendleft({"gf": gm["gf"], "ga": gm["ga"]})
+            hist.setdefault(aid, deque(maxlen=window)).appendleft({"gf": gm["ga"], "ga": gm["gf"]})
 
     if total == 0:
-        return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0, "correct": 0, "total": 0, "series": []}
+        return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0, "correct": 0, "total": 0,
+                "series": [], "predictions": []}
 
     # amostra a cada ~5% dos jogos para uma curva suave (máx ~60 pontos)
     step = max(1, len(series) // 60)
@@ -130,6 +148,7 @@ def backtest_league(league_id: int, home_adv: float = 1.15, window: int = 10,
         "correct": correct,
         "total": total,
         "series": sampled,
+        "predictions": predictions,
     }
 
 

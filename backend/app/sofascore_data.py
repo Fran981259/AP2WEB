@@ -13,6 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import db
 from .feature_engine import parse_stat_value as _parse_score
@@ -86,6 +87,8 @@ _STAT_COLS = {
     "goal_kicks": "goal_kicks",
 }
 
+_SOURCE_STATUS = {100: "played", 0: "scheduled"}
+
 
 def _client():
     """Instância do soccerdata.Sofascore (mecanismo de HTTP com TLS impersonation)."""
@@ -116,7 +119,7 @@ def _extract_stats(raw: dict) -> dict:
     return out
 
 
-def _latest_season(tournament_id: int) -> tuple[int, str] | None:
+def _latest_season(tournament_id: int, heartbeat: Callable[[], None] | None = None) -> tuple[int, str] | None:
     """Retorna (season_id, nome) da temporada ativa.
 
     Sofascore lista a temporada mais nova primeiro. Uma temporada recém-criada
@@ -129,6 +132,8 @@ def _latest_season(tournament_id: int) -> tuple[int, str] | None:
     seasons = data.get("seasons", [])
     fallback: tuple[int, str] | None = None
     for s in seasons[:4]:
+        if heartbeat:
+            heartbeat()
         sid = s.get("id")
         if not sid:
             continue
@@ -191,13 +196,31 @@ def _upsert_match(league_id: int, event: dict) -> bool:
     Jogos já existentes só são atualizados no placar/status (sem re-raspar stats),
     o que deixa re-syncs muito mais rápidos.
     """
+    with db.transaction():
+        inserted = _upsert_match_in_transaction(league_id, event)
+        if _SOURCE_STATUS.get(event.get("status", {}).get("code")) == "played":
+            from .history import resolve_predictions_for_match
+
+            match = db.run_query(
+                "SELECT id FROM matches WHERE league_id=? AND sofascore_id=?",
+                (league_id, event["id"]))
+            if match:
+                resolve_predictions_for_match(match[0]["id"])
+        return inserted
+
+
+def _upsert_match_in_transaction(league_id: int, event: dict) -> bool:
+    """Upsert one match while the caller owns its transaction."""
     eid = event["id"]
     home = event["homeTeam"]
     away = event["awayTeam"]
     hs = event.get("homeScore", {})
     as_ = event.get("awayScore", {})
-    status_code = event.get("status", {}).get("code")
-    played = status_code == 100
+    source_status = _SOURCE_STATUS.get(event.get("status", {}).get("code"))
+    if source_status is None:
+        logger.warning("ignoring event with unsupported source status eid=%s", eid)
+        return False
+    played = source_status == "played"
     ts = event.get("startTimestamp")
     round_no = (event.get("roundInfo") or {}).get("round")
 
@@ -210,60 +233,52 @@ def _upsert_match(league_id: int, event: dict) -> bool:
 
     score_home = hs.get("current") if played else None
     score_away = as_.get("current") if played else None
+    ingested_at = datetime.now(timezone.utc).isoformat()
 
     # jogo já existe? atualiza só o essencial e não re-raspar stats
+    stat_columns = [f"{column}_{side}" for column in _STAT_COLS.values()
+                    for side in ("home", "away")]
     exists = db.run_query(
-        "SELECT id, xg_home, score_home, score_away, status FROM matches WHERE league_id=? AND sofascore_id=?",
-        (league_id, eid))
+        "SELECT id, kickoff_datetime, match_date, round, score_home, score_away, status, "
+        + ", ".join(stat_columns)
+        + " FROM matches WHERE league_id=? AND sofascore_id=?", (league_id, eid))
     if exists:
         existing = dict(exists[0])
-        # Verificar se status mudou de scheduled para played
-        prev_status = existing.get("status")
-        now_played = played
-
-        # Atualizar placar e status
+        # Unknown source states are not a safe basis for changing a persisted match.
+        status = existing["status"]
+        if source_status == "played":
+            status = "played"
+        elif source_status == "scheduled" and existing["status"] != "played":
+            status = "scheduled"
+        match_kickoff = koff or existing["kickoff_datetime"]
         db.run_exec(
-            "UPDATE matches SET home_team_id=?, away_team_id=?, kickoff_datetime=?, round=?, "
-            "status=?, score_home=?, score_away=? WHERE id=?",
-            (home_id, away_id, koff if koff else existing.get("kickoff_datetime"), round_no,
-             "played" if played else "scheduled",
-             score_home, score_away, exists[0]["id"]))
-        
-        # Fluxo FASE 2: Se jogo terminou e stats ainda não foram coletadas completamente
-        if now_played and prev_status != "played":
-            # Verificar quais stats estão faltando
-            missing_stats = []
-            if existing.get("xg_home") is None or existing.get("xg_away") is None:
-                missing_stats.append("xG")
-            if not existing.get("possession_home") or not existing.get("possession_away"):
-                missing_stats.append("possession")
-            # Adicionar outras features conforme necessário...
-            
-            if missing_stats:
-                # Coletar stats agora que jogo está finalizado
-                try:
-                    url = f"https://www.sofascore.com/api/v1/event/{eid}/statistics"
-                    raw = _fetch(url, Path(f"/tmp/sofa_ev_{eid}_postsync.json"))
-                    st = _extract_stats(raw)
-                    # Update columns directly. This path handles a match that
-                    # was scheduled at first sync and later becomes played.
-                    update_vals = {}
-                    for key, column in _STAT_COLS.items():
-                        home_col, away_col = f"{column}_home", f"{column}_away"
-                        if key in st and (existing.get(home_col) is None or existing.get(away_col) is None):
-                            if existing.get(home_col) is None:
-                                update_vals[home_col] = st[key].get("home")
-                            if existing.get(away_col) is None:
-                                update_vals[away_col] = st[key].get("away")
-                    
-                    if update_vals:
-                        set_clause = ", ".join(f"{column}=?" for column in update_vals)
-                        db.run_exec(
-                            f"UPDATE matches SET {set_clause} WHERE id=?",
-                            tuple(update_vals.values()) + (exists[0]["id"],))
-                except (OSError, ValueError, KeyError, Exception) as e:  # noqa: BLE001
-                    logger.warning("post-sync stats fetch eid=%s err=%s", eid, e, exc_info=True)
-                    pass
+            "UPDATE matches SET home_team_id=?, away_team_id=?, kickoff_datetime=?, match_date=?, "
+            "round=?, status=?, score_home=?, score_away=?, source_ingested_at=? WHERE id=?",
+            (home_id, away_id, match_kickoff,
+              match_kickoff[:10] if koff else existing["match_date"],
+              round_no if round_no is not None else existing["round"], status,
+              score_home if score_home is not None else existing["score_home"],
+              score_away if score_away is not None else existing["score_away"], ingested_at,
+              exists[0]["id"]))
+
+        # Retry incomplete stats for every played sync, not just the status transition.
+        if source_status == "played" and any(existing.get(column) is None for column in stat_columns):
+            try:
+                url = f"https://www.sofascore.com/api/v1/event/{eid}/statistics"
+                st = _extract_stats(_fetch(url, Path(f"/tmp/sofa_ev_{eid}_postsync.json")))
+                update_vals = {}
+                for key, column in _STAT_COLS.items():
+                    for side in ("home", "away"):
+                        target = f"{column}_{side}"
+                        value = (st.get(key) or {}).get(side)
+                        if existing.get(target) is None and value is not None:
+                            update_vals[target] = value
+                if update_vals:
+                    set_clause = ", ".join(f"{column}=?" for column in update_vals)
+                    db.run_exec(f"UPDATE matches SET {set_clause} WHERE id=?",
+                                tuple(update_vals.values()) + (exists[0]["id"],))
+            except Exception as e:  # noqa: BLE001 -- upstream statistics endpoint
+                logger.warning("post-sync stats fetch eid=%s err=%s", eid, e, exc_info=True)
         
         return False
 
@@ -287,9 +302,9 @@ def _upsert_match(league_id: int, event: dict) -> bool:
     date_str = koff[:10] if koff else None
 
     cols = ["league_id", "sofascore_id", "home_team_id", "away_team_id", "kickoff_datetime",
-            "match_date", "round", "status", "score_home", "score_away"]
+             "match_date", "round", "status", "score_home", "score_away", "source_ingested_at"]
     vals = [league_id, eid, home_id, away_id, koff, date_str, round_no,
-            "played" if played else "scheduled", score_home, score_away]
+            "played" if played else "scheduled", score_home, score_away, ingested_at]
     for key, col in _STAT_COLS.items():
         cols.append(f"{col}_home")
         cols.append(f"{col}_away")
@@ -306,25 +321,32 @@ def _upsert_match(league_id: int, event: dict) -> bool:
     return cur is not None and cur > 0
 
 
-def _fetch_round_events(tid: int, season_id: int, rid: int) -> list[dict]:
-    """Eventos de uma rodada. Tolerante a 404/403: retorna [] em vez de abortar."""
+def _fetch_round_events(tid: int, season_id: int, rid: int,
+                        heartbeat: Callable[[], None] | None = None) -> tuple[list[dict], bool]:
+    """Return round events and whether both upstream attempts failed."""
     ev_url = f"https://www.sofascore.com/api/v1/unique-tournament/{tid}/season/{season_id}/events/round/{rid}"
     for attempt in (1, 2):
+        if heartbeat:
+            heartbeat()
         try:
             ev_data = _fetch(ev_url, Path(f"/tmp/sofa_round_{tid}_{season_id}_{rid}.json"))
-            return ev_data.get("events", [])
+            return ev_data.get("events", []), False
         except Exception:  # noqa: BLE001
             time.sleep(2 + attempt)
-    return []
+    return [], True
 
 
-def _fetch_all_events(tid: int, season_id: int) -> list[dict]:
+def _fetch_all_events(tid: int, season_id: int,
+                      heartbeat: Callable[[], None] | None = None) -> tuple[list[dict], list[int]]:
     """Todos os eventos da temporada via paginação events/last (cobre fases de mata-mata).
 
     Retorna lista de eventos únicos (por id). Tolerante a falhas de página.
     """
     seen: dict[int, dict] = {}
+    failed_pages = []
     for page in range(0, 40):
+        if heartbeat:
+            heartbeat()
         try:
             url = (f"https://www.sofascore.com/api/v1/unique-tournament/{tid}/season/"
                    f"{season_id}/events/last/{page}")
@@ -337,19 +359,23 @@ def _fetch_all_events(tid: int, season_id: int) -> list[dict]:
             if not ev_data.get("hasNextPage"):
                 break
         except Exception:  # noqa: BLE001
+            failed_pages.append(page)
             time.sleep(2)
             break
-    return list(seen.values())
+    return list(seen.values()), failed_pages
 
 
-def _season_rounds(tid: int, season_id: int) -> list[int]:
+def _season_rounds(tid: int, season_id: int,
+                   heartbeat: Callable[[], None] | None = None) -> tuple[list[int], bool]:
     """Números de rodadas da temporada, sem duplicatas (Copa tem 5 e 5 duplicados)."""
     try:
+        if heartbeat:
+            heartbeat()
         rounds_data = _fetch(
             f"https://www.sofascore.com/api/v1/unique-tournament/{tid}/season/{season_id}/rounds",
             Path(f"/tmp/sofa_rounds_{tid}_{season_id}.json"))
     except Exception:  # noqa: BLE001
-        return []
+        return [], True
     seen: set[int] = set()
     out: list[int] = []
     for r in rounds_data.get("rounds", []):
@@ -357,49 +383,72 @@ def _season_rounds(tid: int, season_id: int) -> list[int]:
         if n is not None and n not in seen:
             seen.add(n)
             out.append(n)
-    return out
+    return out, False
 
 
-def sync_league(cfg: dict) -> dict:
+def sync_league(cfg: dict, heartbeat: Callable[[], None] | None = None) -> dict:
     """Sincroniza uma liga inteira (temporada ativa + rodadas + mata-mata + stats).
 
     Fontes: rodadas numeradas (liga) + paginação events/last (fases eliminatórias),
     deduplicadas por event id. Tolerante a falhas por rodada/página/jogo.
     """
     tid = cfg["id"]
-    season = _latest_season(tid)
+    if heartbeat:
+        heartbeat()
+    season = _latest_season(tid, heartbeat=heartbeat)
     if not season:
         return {"ok": False, "error": "Sem temporada disponível"}
     season_id, season_name = season
     league_id = _upsert_league(cfg, season_id, season_name)
 
     candidates = [season] + _older_seasons(tid, season_id)
+    failed_rounds: list[dict] = []
+    failed_pages: list[dict] = []
+    rounds_unavailable: list[int] = []
     for sid, sname in candidates:
-        rounds = _season_rounds(tid, sid)
+        if heartbeat:
+            heartbeat()
+        rounds, rounds_failed = _season_rounds(tid, sid, heartbeat=heartbeat)
+        if rounds_failed:
+            rounds_unavailable.append(sid)
 
         events: dict[int, dict] = {}
-        skipped = []
         for rid in rounds:
-            for e in _fetch_round_events(tid, sid, rid):
+            if heartbeat:
+                heartbeat()
+            round_events, failed = _fetch_round_events(tid, sid, rid, heartbeat=heartbeat)
+            if failed:
+                failed_rounds.append({"season_id": sid, "round": rid})
+            for e in round_events:
                 events[e["id"]] = e
             time.sleep(0.1)
         # mata-mata (fases que não aparecem nas rodadas numeradas)
-        for e in _fetch_all_events(tid, sid):
+        all_events, pages = _fetch_all_events(tid, sid, heartbeat=heartbeat)
+        failed_pages.extend({"season_id": sid, "page": page} for page in pages)
+        for e in all_events:
             events.setdefault(e["id"], e)
 
         if events:
             saved = 0
             for event in events.values():
+                if heartbeat:
+                    heartbeat()
                 if _upsert_match(league_id, event):
                     saved += 1
                 time.sleep(0.05)
-            db.run_exec("UPDATE leagues SET last_sync=datetime('now'), season_id=?, season_name=? WHERE id=?",
-                        (sid, sname, league_id))
-            return {"ok": True, "league_id": league_id, "matches_found": len(events),
-                    "matches_saved": saved, "season": sname, "skipped_rounds": skipped}
+            partial = bool(failed_rounds or failed_pages or rounds_unavailable)
+            if not partial:
+                db.run_exec("UPDATE leagues SET last_sync=datetime('now'), season_id=?, season_name=? WHERE id=?",
+                            (sid, sname, league_id))
+            return {"ok": not partial, "partial": partial, "league_id": league_id,
+                    "matches_found": len(events), "matches_saved": saved, "season": sname,
+                    "failed_rounds": failed_rounds, "failed_pages": failed_pages,
+                    "rounds_unavailable": rounds_unavailable}
 
-    return {"ok": False, "error": "Nenhum evento nas temporadas recentes",
-            "league_id": league_id}
+    partial = bool(failed_rounds or failed_pages or rounds_unavailable)
+    return {"ok": False, "partial": partial, "error": "Nenhum evento nas temporadas recentes",
+            "league_id": league_id, "failed_rounds": failed_rounds,
+            "failed_pages": failed_pages, "rounds_unavailable": rounds_unavailable}
 
 
 def _older_seasons(tid: int, current_season_id: int) -> list[tuple[int, str]]:
@@ -414,7 +463,7 @@ def _older_seasons(tid: int, current_season_id: int) -> list[tuple[int, str]]:
     return out
 
 
-def sync_league_local(league_id: int) -> dict:
+def sync_league_local(league_id: int, heartbeat: Callable[[], None] | None = None) -> dict:
     """Sincroniza uma liga do banco pelo id local (síncrono)."""
     row = db.run_query("SELECT sofascore_id FROM leagues WHERE id=?", (league_id,))
     if not row:
@@ -423,7 +472,7 @@ def sync_league_local(league_id: int) -> dict:
     cfg = next((c for c in load_leagues() if c["id"] == sid), None)
     if not cfg:
         raise IndexError("Liga sem configuração de sync")
-    return sync_league(cfg)
+    return sync_league(cfg, heartbeat=heartbeat)
 
 
 def status() -> dict:

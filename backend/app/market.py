@@ -14,6 +14,7 @@ from typing import Any
 
 from . import db
 from .prediction import predict_match
+from .odds_store import latest_1x2_quote
 
 OUTCOMES = ("1", "X", "2")
 LABELS_PT = {"1": "Casa", "X": "Empate", "2": "Visita"}
@@ -38,37 +39,48 @@ def _ev(probs: dict[str, float], market_odds: dict[str, float]) -> dict[str, flo
 
 
 def market_for_match(match_id: int, as_of: str | None = None,
-                     vig: float = DEFAULT_VIG,
-                     market: dict[str, float] | None = None) -> dict[str, Any]:
+                      vig: float = DEFAULT_VIG,
+                      market: dict[str, float] | None = None) -> dict[str, Any]:
     """Computa fair / market odds + EV para um jogo.
 
-    - `market` (opcional): odds REAIS de um bookmaker externo → compara EV real
-      contra o bookmaker. Se omitido, market = fair com vig.
+    Quotes externas são lidas exclusivamente do repositório persistido. O
+    parâmetro `market` é ignorado para impedir que entrada não auditada gere EV.
     """
+    rows = db.run_query("SELECT status FROM matches WHERE id=?", (match_id,))
+    if not rows:
+        raise IndexError("Partida não encontrada")
+    if rows[0]["status"] != "scheduled":
+        raise ValueError("Market analysis is available only for scheduled matches")
     pred = predict_match(match_id, as_of)
     probs = pred["probs"]["1x2"]
 
     fair = _fair_odds(probs)
-    mkt = market if market is not None else _market_odds(fair, vig)
-    ev = _ev(probs, mkt)
+    del market
+    quote = latest_1x2_quote(match_id, as_of)
+    market_available = quote is not None
+    mkt = quote["odds"] if quote else None
+    ev = _ev(probs, mkt) if mkt else None
 
     # overround (margem implícita do bookmaker)
-    overround = sum(1.0 / mkt[k] for k in OUTCOMES)
+    overround = sum(1.0 / mkt[k] for k in OUTCOMES) if mkt else None
 
     # kelly fracionado (FASE 11 baseline; aqui exposto como EV Kelly)
-    kelly = {k: round((mkt[k] * probs[k] - 1.0) / (mkt[k] - 1.0), 4)
-             for k in OUTCOMES if mkt[k] > 1.0}
+    kelly = ({k: round((mkt[k] * probs[k] - 1.0) / (mkt[k] - 1.0), 4)
+              for k in OUTCOMES if mkt[k] > 1.0} if mkt else {})
 
     return {
         "match_id": match_id,
         "probs": {k: round(probs[k], 6) for k in OUTCOMES},
         "fair_odds": {k: round(fair[k], 3) for k in OUTCOMES},
-        "market_odds": {k: round(mkt[k], 3) for k in OUTCOMES},
+        "market_available": market_available,
+        "market_quote": ({"provider": quote["provider"], "captured_at": quote["captured_at"]}
+                         if quote else None),
+        "market_odds": {k: round(mkt[k], 3) for k in OUTCOMES} if mkt else None,
         "ev": ev,
         "kelly_full": kelly,  # FASE 11: fracionar depois
-        "vig": vig,
-        "overround": round(overround, 4),
-        "value_bets": [k for k in OUTCOMES if ev[k] > 0],  # apostas com EV positivo
+        "vig": vig if mkt else None,
+        "overround": round(overround, 4) if overround is not None else None,
+        "value_bets": [k for k in OUTCOMES if ev and ev[k] > 0],
         "model_info": pred["model"],
     }
 

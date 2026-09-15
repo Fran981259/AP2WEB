@@ -10,17 +10,22 @@ Uso:
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import execution_store
+
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 BASELINE_FILE = _DATA_DIR / "evolution_baseline.json"
 HISTORY_FILE = _DATA_DIR / "evolution_history.jsonl"
 API_HEALTH_URL = os.environ.get("AP2WEB_API_URL",
-                                "http://localhost:8000/api/health")
+                                 "http://localhost:8000/api/health")
+logger = logging.getLogger("ap2web.evolution")
 
 # Métricas-chave que devem evoluir (todas walk-forward, as-of consistente)
 LEAGUES_TO_TRACK = [
@@ -34,6 +39,45 @@ LEAGUES_TO_TRACK = [
     84, 68, 61,                # Estônia, Sudamericana, Champions
     66, 73, 79, 9,             # Europa League, National League, México, Paraguai Clausura
 ]  # 31 ligas com >=30 jogos jogados
+
+
+def _content_hash(value: dict) -> str:
+    return hashlib.sha256(execution_store.canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _start_measurement_execution(*, skip_regression: bool, source: str) -> dict:
+    """Start a ledger record without collecting metrics at import time."""
+    parameters = {
+        "source": source,
+        "effective_parameters": {
+            "skip_regression": skip_regression,
+            "league_ids": LEAGUES_TO_TRACK,
+        },
+    }
+    return execution_store.start(
+        execution_type="evolution_measurement",
+        snapshot_hash=_content_hash(parameters), parameters=parameters)
+
+
+def _finish_measurement_execution(execution: dict, status: str, *, snapshot: dict | None = None,
+                                  results: dict | None = None, error: str | None = None) -> None:
+    """Finish a measurement record while preserving its original failure."""
+    payload: dict = {"snapshot": snapshot} if snapshot is not None else {}
+    if results is not None:
+        payload["results"] = results
+        payload["metrics"] = {
+            "league_count": len(snapshot.get("leagues", {})) if snapshot else 0,
+            "api_health": snapshot.get("api_health") if snapshot else None,
+            "regression_suite": snapshot.get("regression_suite") if snapshot else None,
+        }
+    if error is not None:
+        payload["error"] = error
+    try:
+        execution_store.finish(
+            execution_id=execution["execution_id"], status=status,
+            artifact_content_hash=_content_hash(payload), results=payload)
+    except Exception:
+        logger.exception("could not finish evolution execution %s", execution["execution_id"])
 
 
 def _snapshot(skip_regression: bool = False) -> dict:
@@ -214,9 +258,16 @@ def _evolution_pct(current: dict, history: list[dict]) -> dict:
 
 def main():
     if "--baseline" in sys.argv:
-        snap = _snapshot()
-        _save_baseline(snap)
-        _append_history(snap)
+        execution = _start_measurement_execution(skip_regression=False, source="cli_baseline")
+        try:
+            snap = _snapshot()
+            _save_baseline(snap)
+            _append_history(snap)
+        except Exception as error:
+            _finish_measurement_execution(execution, "failed", error=str(error)[:2000])
+            raise
+        _finish_measurement_execution(execution, "completed", snapshot=snap,
+                                      results={"baseline_updated": True})
         print(f"Baseline salvo em {BASELINE_FILE} ({snap['timestamp']})")
         return
 
@@ -225,19 +276,26 @@ def main():
         print("Nenhum baseline. Rode com --baseline primeiro.")
         sys.exit(1)
 
-    current = _snapshot()
-    changes = _compare(current, baseline)
+    execution = _start_measurement_execution(skip_regression=False, source="cli_check")
+    try:
+        current = _snapshot()
+        changes = _compare(current, baseline)
 
-    if not changes:
-        print("✅ Nenhuma evolução detectada — sistema está estável.")
-    else:
-        print(f"⚡ {len(changes)} mudança(s) detectada(s):")
-        for c in changes:
-            print(f"  {c['metric']}: {c['before']} → {c['after']} (delta={c['delta']})")
+        if not changes:
+            print("✅ Nenhuma evolução detectada — sistema está estável.")
+        else:
+            print(f"⚡ {len(changes)} mudança(s) detectada(s):")
+            for c in changes:
+                print(f"  {c['metric']}: {c['before']} → {c['after']} (delta={c['delta']})")
 
-    # Persiste a medição no histórico e atualiza o baseline
-    _append_history(current)
-    _save_baseline(current)
+        # Persiste a medição no histórico e atualiza o baseline
+        _append_history(current)
+        _save_baseline(current)
+    except Exception as error:
+        _finish_measurement_execution(execution, "failed", error=str(error)[:2000])
+        raise
+    _finish_measurement_execution(execution, "completed", snapshot=current,
+                                  results={"changes": changes, "baseline_updated": True})
 
 
 if __name__ == "__main__":

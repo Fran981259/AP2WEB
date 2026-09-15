@@ -3,9 +3,9 @@ from collections import deque
 
 import pytest
 
-from backend.app import db, prediction
-from backend.app.feature_engine import compute_match_stats, compute_team_stats
-from backend.app.model import build_matrix, dixon_coles_tau
+from backend.app import db, learning, prediction
+from backend.app.feature_engine import compute_match_stats, compute_team_stats, window_stats
+from backend.app.model import build_gamma_poisson_matrix, build_matrix, dixon_coles_tau
 
 
 @pytest.fixture
@@ -34,6 +34,12 @@ def test_matrix_is_probability_distribution():
             assert sum(values) == pytest.approx(1)
 
 
+def test_gamma_poisson_matrix_is_probability_distribution():
+    values = [p for row in build_gamma_poisson_matrix(3.7, 2.2, 2.1, 1.8) for p in row]
+    assert min(values) >= 0
+    assert sum(values) == pytest.approx(1)
+
+
 def test_blend_is_selected_once():
     selected = compute_match_stats({"score_home": 4, "score_away": 2, "xg_home": 2, "xg_away": 1}, "blend")
     averages = compute_team_stats(deque([selected]), 10, "blend")
@@ -44,6 +50,20 @@ def test_blend_is_selected_once():
 
 def test_missing_xg_is_not_zero():
     assert compute_match_stats({"score_home": 4, "score_away": 2}, "blend")["gf"] == 4
+
+
+def test_completed_match_requires_both_scores():
+    with pytest.raises(ValueError, match="both scores"):
+        compute_match_stats({"score_home": 4}, "goals")
+
+
+def test_window_stats_selects_newest_matches_regardless_of_input_order():
+    matches = [
+        {"id": 1, "kickoff_datetime": "2020-01-01", "home_team_id": 1, "away_team_id": 2, "score_home": 1, "score_away": 0},
+        {"id": 3, "kickoff_datetime": "2020-03-01", "home_team_id": 1, "away_team_id": 2, "score_home": 5, "score_away": 0},
+        {"id": 2, "kickoff_datetime": "2020-02-01", "home_team_id": 1, "away_team_id": 2, "score_home": 3, "score_away": 0},
+    ]
+    assert window_stats(matches, 1, 2, "goals")["gf_avg"] == 4
 
 
 @pytest.mark.parametrize("feature,expected", [("goals", (1, 3)), ("xg", (0.6, 2.4)), ("blend", (0.8, 2.7))])
@@ -65,6 +85,15 @@ def test_bayesian_override_with_context_is_deterministic(match_history, monkeypa
     assert one["probs"] == two["probs"]
 
 
+def test_bayesian_uses_the_model_feature(match_history, monkeypatch):
+    lid, home, away, _ = match_history
+    monkeypatch.setattr(prediction, "_model_for", lambda _: {
+        "feature": "xg", "window": 10, "home_advantage": 1.15,
+        "rho": 0, "method": "bayesian", "ctx_form": 0})
+    result = prediction.predict_fixture(lid, home, away)
+    assert result["bayesian"]["inputs"]["home"]["gf_avg"] == pytest.approx((1.3 + 2.4) / 6)
+
+
 def test_sqlite_write_count_contract(match_history):
     _, _, _, mid = match_history
     assert db.run_exec("UPDATE matches SET round=1 WHERE id=?", (mid,)) == 1
@@ -77,3 +106,37 @@ def test_scheduled_match_is_only_prediction_candidate(match_history):
         "INSERT INTO matches(league_id,home_team_id,away_team_id,kickoff_datetime,status) VALUES(?,?,?,?,?)",
         (lid, home, away, "2030-01-01T12:00:00+00:00", "scheduled"))
     assert [p["match"]["id"] for p in prediction.predict_league_upcoming(lid)] == [scheduled]
+
+
+def test_match_prediction_uses_kickoff_as_default_cutoff(match_history, monkeypatch):
+    lid, home, away, match_id = match_history
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["cutoff"] = args[-2]
+        return {"ok": True}
+
+    monkeypatch.setattr(prediction, "_build", fake_build)
+    assert prediction.predict_match(match_id) == {"ok": True}
+    assert captured["cutoff"] == "2020-01-01T12:00:00+00:00"
+    with pytest.raises(ValueError, match="cannot be after"):
+        prediction.predict_match(match_id, "2020-01-02T12:00:00+00:00")
+
+
+def test_backtest_does_not_leak_between_same_kickoff_fixtures(match_history, monkeypatch):
+    lid, home, away, _ = match_history
+    for score_home, score_away in [(9, 0), (0, 2)]:
+        db.run_exec(
+            "INSERT INTO matches(league_id,home_team_id,away_team_id,kickoff_datetime,status,score_home,score_away) VALUES(?,?,?,?,?,?,?)",
+            (lid, home, away, "2020-02-01T12:00:00+00:00", "played", score_home, score_away))
+    observed = []
+
+    def fake_probs(home_stats, away_stats, *_args):
+        observed.append((home_stats["gf_avg"], away_stats["gf_avg"]))
+        return {"1": 0.4, "X": 0.2, "2": 0.4}
+
+    monkeypatch.setattr(learning, "MIN_SAMPLES", 1)
+    monkeypatch.setattr(learning, "_predict_probs", fake_probs)
+    result = learning.backtest_league(lid, feature="goals")
+    assert result["total"] == 2
+    assert observed == [(3.0, 1.0), (3.0, 1.0)]

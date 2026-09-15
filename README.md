@@ -40,12 +40,13 @@ npm run test
 ## Health Endpoints
 
 - `GET /api/health`: process liveness.
-- `GET /api/ready`: API/database/schema readiness. External worker verification
-  is an open item.
+- `GET /api/ready`: API/database/schema readiness and recent durable worker
+  heartbeat when a worker is required.
 - `GET /api/health/dependencies`: safe dependency status.
 
 ## Deployment
 
-Railway is the documented target. It requires separate API and worker services,
-PostgreSQL, Redis, secure cookie settings and production secrets. See
-`RAILWAY.md` and `MIGRATION.md`.
+Railway is the production target. API, standalone worker, PostgreSQL, Redis,
+and UptimeRobot readiness/liveness monitors were validated on 2026-09-13.
+Scientific features and market/risk signals remain experimental. See
+`RAILWAY.md`, `MIGRATION.md`, and `PROTOCOLO-AVALIACAO-CIENTIFICA.md`.

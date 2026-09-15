@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 MODE = "postgres" if DATABASE_URL else "sqlite"
@@ -19,6 +22,9 @@ MODE = "postgres" if DATABASE_URL else "sqlite"
 DB_PATH = Path(os.environ.get(
     "AP2WEB_DB_PATH",
     Path(__file__).resolve().parent.parent / "ap2web.db"))
+
+_transaction_connection: ContextVar[Any | None] = ContextVar(
+    "transaction_connection", default=None)
 
 if MODE == "postgres":
     import psycopg  # psycopg 3
@@ -132,6 +138,7 @@ CREATE TABLE IF NOT EXISTS matches (
     final_third_home REAL, final_third_away REAL,
     throw_ins_home REAL, throw_ins_away REAL,
     goal_kicks_home REAL, goal_kicks_away REAL,
+    source_ingested_at TEXT,                -- UTC time this source record was fetched/ingested
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(league_id, sofascore_id)
 );
@@ -186,6 +193,21 @@ CREATE INDEX IF NOT EXISTS idx_predictions_match ON predictions(match_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_user ON predictions(user_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_user_status ON predictions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_predictions_league ON predictions(league_id);
+
+CREATE TABLE IF NOT EXISTS odds_quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    market_type TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    decimal_odd REAL NOT NULL,
+    provider TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    source_ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source_event_id TEXT,
+    UNIQUE(match_id, market_type, outcome, provider, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_odds_quotes_asof
+    ON odds_quotes(match_id, market_type, captured_at);
 
 CREATE TABLE IF NOT EXISTS league_models (
     league_id INTEGER PRIMARY KEY REFERENCES leagues(id) ON DELETE CASCADE,
@@ -279,6 +301,22 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
 CREATE INDEX IF NOT EXISTS idx_audit_username ON audit_events(username);
+
+CREATE TABLE IF NOT EXISTS execution_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    execution_type TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('started', 'finished')),
+    status TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    parameters TEXT NOT NULL,
+    artifact_content_hash TEXT,
+    results TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_execution_events_execution ON execution_events(execution_id, id);
+CREATE INDEX IF NOT EXISTS idx_execution_events_type ON execution_events(execution_type, id);
 """
 
 _PG_SCHEMA = re.sub(
@@ -315,6 +353,23 @@ def _ensure_provenance_cols():
                 run_exec(f"ALTER TABLE predictions ADD COLUMN IF NOT EXISTS {col} {typ}")
         except Exception:
             pass
+
+
+def _ensure_match_source_cols() -> None:
+    """Add source-ingestion provenance without rewriting legacy match rows."""
+    if MODE == "sqlite":
+        cols = [r[1] for r in run_query("PRAGMA table_info(matches)")]
+        if "source_ingested_at" not in cols:
+            run_exec("ALTER TABLE matches ADD COLUMN source_ingested_at TEXT")
+    else:
+        run_exec("ALTER TABLE matches ADD COLUMN IF NOT EXISTS source_ingested_at TEXT")
+
+
+def _record_migration(version: str) -> None:
+    if MODE == "sqlite":
+        run_exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)", (version,))
+    else:
+        run_exec("INSERT INTO schema_migrations(version) VALUES(?) ON CONFLICT DO NOTHING", (version,))
 
 def _ensure_user_cols() -> None:
     """Ensure role + is_active on users for DBs created before Phase 1/2."""
@@ -364,6 +419,30 @@ def _ensure_job_cols() -> None:
         raise
 
 
+def _ensure_execution_events() -> None:
+    """Create the append-only execution ledger for databases predating Phase 6."""
+    if MODE == "sqlite":
+        run_exec(
+            "CREATE TABLE IF NOT EXISTS execution_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, execution_id TEXT NOT NULL, "
+            "execution_type TEXT NOT NULL, event_type TEXT NOT NULL CHECK(event_type IN ('started', 'finished')), "
+            "status TEXT NOT NULL, ts TEXT NOT NULL, snapshot_hash TEXT NOT NULL, "
+            "parameters TEXT NOT NULL, artifact_content_hash TEXT, results TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+    else:
+        run_exec(
+            "CREATE TABLE IF NOT EXISTS execution_events ("
+            "id SERIAL PRIMARY KEY, execution_id TEXT NOT NULL, execution_type TEXT NOT NULL, "
+            "event_type TEXT NOT NULL CHECK(event_type IN ('started', 'finished')), "
+            "status TEXT NOT NULL, ts TEXT NOT NULL, snapshot_hash TEXT NOT NULL, "
+            "parameters TEXT NOT NULL, artifact_content_hash TEXT, results TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+    run_exec("CREATE INDEX IF NOT EXISTS idx_execution_events_execution ON execution_events(execution_id, id)")
+    run_exec("CREATE INDEX IF NOT EXISTS idx_execution_events_type ON execution_events(execution_type, id)")
+
+
 def init_db() -> None:
     if MODE == "sqlite":
         conn = get_conn()
@@ -397,6 +476,10 @@ def init_db() -> None:
         # lock held by this same process during repeated app startup/tests.
         _ensure_user_cols()
         _ensure_job_cols()
+        _ensure_match_source_cols()
+        _ensure_execution_events()
+        _record_migration("20260914_source_ingestion")
+        _record_migration("20260914_execution_events")
         return
     with _pg_connect() as conn:
         for stmt in _PG_SCHEMA.split(";"):
@@ -414,6 +497,10 @@ def init_db() -> None:
         _ensure_provenance_cols()
         _ensure_user_cols()
         _ensure_job_cols()
+        _ensure_match_source_cols()
+        _ensure_execution_events()
+        _record_migration("20260914_source_ingestion")
+        _record_migration("20260914_execution_events")
 
 
 def _seed_leagues(conn: sqlite3.Connection) -> None:
@@ -458,8 +545,45 @@ def reset_db() -> None:
                 conn.execute(stmt)
 
 
+@contextmanager
+def transaction():
+    """Run database calls in one transaction on either supported engine."""
+    if _transaction_connection.get() is not None:
+        yield
+        return
+    if MODE == "sqlite":
+        conn = get_conn()
+        token = _transaction_connection.set(conn)
+        try:
+            conn.execute("BEGIN")
+            yield
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            _transaction_connection.reset(token)
+            conn.close()
+        return
+    with _pg_connect() as conn:
+        token = _transaction_connection.set(conn)
+        try:
+            yield
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            _transaction_connection.reset(token)
+
+
 def run_query(query: str, params: tuple = ()) -> list[dict]:
     """SELECT — retorna linhas acessíveis por r["coluna"]."""
+    conn = _transaction_connection.get()
+    if conn is not None:
+        if MODE == "sqlite":
+            return conn.execute(query, params).fetchall()
+        return conn.execute(_to_pg_sql(query), params).fetchall()
     if MODE == "sqlite":
         conn = get_conn()
         try:
@@ -476,6 +600,18 @@ def run_exec(query: str, params: tuple = ()) -> int:
     Em Postgres, INSERTs em tabelas com chave numérica ``id`` ganham RETURNING
     id para preservar o contrato lastrowid usado pelo restante do código.
     """
+    conn = _transaction_connection.get()
+    if conn is not None:
+        if MODE == "sqlite":
+            cur = conn.execute(query, params)
+            if query.lstrip().upper().startswith("INSERT"):
+                return cur.lastrowid if cur.lastrowid is not None else 0
+            return cur.rowcount
+        q = _to_pg_sql(query)
+        returns_id = _insert_returns_id(q)
+        if returns_id:
+            q += " RETURNING id"
+        return _pg_exec(conn, q, params, returns_id, commit=False)
     if MODE == "sqlite":
         conn = get_conn()
         try:
@@ -500,20 +636,23 @@ def _insert_returns_id(query: str) -> bool:
     return bool(match and "RETURNING" not in query.upper() and match.group(1).lower() in {
         "users", "leagues", "teams", "matches", "predictions", "jobs",
         "auth_sessions", "audit_events",
+        "execution_events",
     })
 
 
-def _pg_exec(conn, q: str, params: tuple, returns_id: bool) -> int:
+def _pg_exec(conn, q: str, params: tuple, returns_id: bool, commit: bool = True) -> int:
     """Executa com RETURNING id; se a tabela não tiver coluna id, cai para rowcount."""
     try:
         cur = conn.execute(q, params)
         row = cur.fetchone() if returns_id else None
-        conn.commit()
+        if commit:
+            conn.commit()
         return row["id"] if row else cur.rowcount
     except psycopg.errors.UndefinedColumn:
         conn.rollback()
         if not returns_id:
             raise
         cur = conn.execute(q.replace(" RETURNING id", ""), params)
-        conn.commit()
+        if commit:
+            conn.commit()
         return cur.rowcount

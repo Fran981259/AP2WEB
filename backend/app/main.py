@@ -12,9 +12,11 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path as FsPath
 from typing import Literal
 
@@ -31,8 +33,7 @@ from .auth import (authenticate, create_user, current_user,
                    current_user_with_role, logout_session, refresh_session,
                    require_permission)
 from .history import delete_prediction, list_predictions, save_prediction, stats
-from .learning import (backtest_league, calibration_status,
-                       model_status, motor_curve)
+from .learning import calibration_status, model_status, motor_curve
 from .prediction import predict_league_upcoming, predict_match, predict_fixture
 from .ratelimit import rate_limit
 
@@ -331,7 +332,7 @@ class PredictionBody(BaseModel):
     model_config = ALIASES_OK
 
     league_id: int = Field(gt=0)
-    match_id: int | None = Field(default=None, gt=0)
+    match_id: int = Field(gt=0)
     home_team_id: int = Field(gt=0)
     away_team_id: int = Field(gt=0)
     home_name: str = Field(min_length=1, max_length=120)
@@ -376,6 +377,36 @@ class PredictionBody(BaseModel):
         if v is not None and not math.isfinite(v):
             raise ValueError("odd inválida")
         return v
+
+
+    @field_validator("pick_value")
+    @classmethod
+    def _valid_pick_value(cls, value, info):
+        pick_type = info.data.get("pick_type")
+        valid = (
+            (pick_type == "1X2" and value in {"1", "X", "2"})
+            or (pick_type == "GOLS" and re.fullmatch(
+                r"(?:over|under)_(?:0|[1-9][0-9]*)\.5", value))
+            or (pick_type == "BTTS" and value in {"sim", "nao"})
+        )
+        if not valid:
+            raise ValueError("jogada não suportada")
+        return value
+
+    @field_validator("pick_type")
+    @classmethod
+    def _valid_pick_type(cls, value):
+        if value not in {"1X2", "GOLS", "BTTS"}:
+            raise ValueError("tipo de jogada não suportado")
+        return value
+
+
+class OddsQuoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str = Field(min_length=1, max_length=120)
+    captured_at: str = Field(min_length=20, max_length=40)
+    odds: dict[str, float]
+    source_event_id: str | None = Field(default=None, max_length=120)
 
 
 class RiskConfigBody(BaseModel):
@@ -495,6 +526,21 @@ def sofascore_sync_league(league_id: int = Path(gt=0), request: Request = None,
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/api/odds/sync", tags=["market"])
+def odds_sync(sport_key: str, request: Request,
+              region: str = "eu", user: dict = Depends(require_permission("sync:data")),
+              _: None = Depends(csrf_protect), __: None = Depends(rate_limit("sync"))):
+    """Enfileira ingestão auditável de odds 1X2 da The Odds API."""
+    from .jobs import create_job
+    _audit(user, "odds.sync", request, resource_type="job")
+    try:
+        job = create_job("sync_odds", requested_by=_user_id(user["username"]),
+                         parameters={"sport_key": sport_key, "region": region})
+        return {"ok": True, "job": job, "job_id": job["id"]}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.get("/api/sofascore/status", tags=["sofascore"])
 def sofascore_status(user: dict = Depends(current_user_with_role)):
     """Return synchronization status from the durable jobs table."""
@@ -590,6 +636,8 @@ def prediction(match_id: int = Path(gt=0), user: str = Depends(current_user),
         return predict_match(match_id, as_of_timestamp=as_of_timestamp)
     except IndexError:
         raise HTTPException(status_code=404, detail="Partida não encontrada")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/predict/fixture", tags=["prediction"])
@@ -683,9 +731,12 @@ def _user_id(username: str) -> int:
 
 @app.post("/api/predictions", tags=["prediction"])
 def create_prediction(body: PredictionBody, user: str = Depends(current_user),
-                      _: None = Depends(csrf_protect),
-                      __: None = Depends(rate_limit("prediction"))):
-    return save_prediction(_user_id(user), body.model_dump())
+                       _: None = Depends(csrf_protect),
+                       __: None = Depends(rate_limit("prediction"))):
+    try:
+        return save_prediction(_user_id(user), body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/predictions", tags=["prediction"])
@@ -759,7 +810,8 @@ def learning_curve(user: str = Depends(current_user)):
 
 @app.get("/api/learning/backtest/{league_id}", tags=["learning"])
 def learning_backtest(league_id: int = Path(gt=0), user: str = Depends(current_user)):
-    return backtest_league(league_id)
+    from .backtest_engine import run_single_league_backtest
+    return run_single_league_backtest(league_id)
 
 
 @app.get("/api/learning/xgb/{league_id}", tags=["learning"])
@@ -771,9 +823,25 @@ def learning_xgb_comparison(league_id: int = Path(gt=0), user: str = Depends(cur
 
 @app.get("/api/market/{match_id}", tags=["market"])
 def market_match(match_id: int = Path(gt=0), as_of: str | None = None,
-                 user: str = Depends(current_user)):
+                  user: str = Depends(current_user)):
     from .market import market_for_match
-    return market_for_match(match_id, as_of)
+    try:
+        return market_for_match(match_id, as_of)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Partida não encontrada")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/market/{match_id}/quotes", status_code=201, tags=["market"])
+def market_quote(match_id: int, body: OddsQuoteBody,
+                 user: dict = Depends(require_permission("sync:data"))):
+    from .odds_store import save_1x2_quote
+    try:
+        save_1x2_quote(match_id, body.provider, body.captured_at, body.odds, body.source_event_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "match_id": match_id, "market_type": "1x2"}
 
 
 @app.get("/api/market/league/{league_id}", tags=["market"])
@@ -798,6 +866,8 @@ def risk_match(match_id: int = Path(gt=0), as_of: str | None = None,
         return risk_for_match(match_id, cfg, as_of)
     except IndexError:
         raise HTTPException(status_code=404, detail="Partida não encontrada")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/risk/league/{league_id}", tags=["risk"])
@@ -829,34 +899,47 @@ def risk_portfolio(matches: list[int], kelly_fraction: float = 0.25,
 @app.get("/api/evolution/snapshot", tags=["evolution"])
 def evolution_snapshot(user: str = Depends(current_user)):
     from .evolution_tracker import (_snapshot, _load_baseline, _compare,
-                                    _append_history, _history_count,
-                                    _evolution_pct, _load_history)
-    current = _snapshot(skip_regression=True)
-    baseline = _load_baseline()
-    current["api_health"] = True
-    current["regression_suite"] = baseline.get("regression_suite") if baseline else None
-    changes = _compare(current, baseline) if baseline else []
-    history = _load_history(limit=10**9)
-    evolution = _evolution_pct(current, history) if history else {}
+                                     _append_history, _history_count,
+                                     _evolution_pct, _load_history,
+                                     _start_measurement_execution,
+                                     _finish_measurement_execution)
+    execution = _start_measurement_execution(skip_regression=True, source="endpoint")
+    try:
+        current = _snapshot(skip_regression=True)
+        baseline = _load_baseline()
+        current["api_health"] = True
+        current["regression_suite"] = baseline.get("regression_suite") if baseline else None
+        changes = _compare(current, baseline) if baseline else []
+        history = _load_history(limit=10**9)
+        evolution = _evolution_pct(current, history) if history else {}
 
-    if current.get("leagues"):
-        league_ids = [int(lid) for lid in current["leagues"].keys()]
-        placeholders = ",".join("?" for _ in league_ids)
-        league_names = db.run_query(
-            f"SELECT id, name FROM leagues WHERE id IN ({placeholders})",
-            tuple(league_ids))
-        name_map = {str(r["id"]): r["name"] for r in league_names}
-        for lid, m in current["leagues"].items():
-            m["league_name"] = name_map.get(lid, f"Liga {lid}")
+        if current.get("leagues"):
+            league_ids = [int(lid) for lid in current["leagues"].keys()]
+            placeholders = ",".join("?" for _ in league_ids)
+            league_names = db.run_query(
+                f"SELECT id, name FROM leagues WHERE id IN ({placeholders})",
+                tuple(league_ids))
+            name_map = {str(r["id"]): r["name"] for r in league_names}
+            for lid, m in current["leagues"].items():
+                m["league_name"] = name_map.get(lid, f"Liga {lid}")
 
-    _append_history(current)
+        _append_history(current)
+    except Exception as error:
+        _finish_measurement_execution(execution, "failed", error=str(error)[:2000])
+        raise
+    history_size = _history_count()
+    _finish_measurement_execution(execution, "completed", snapshot=current, results={
+        "changes": changes,
+        "evolution": evolution,
+        "history_size": history_size,
+    })
     return {
         "current": current,
         "baseline": baseline,
         "changes": changes,
         "evolution": evolution,
         "stable": len(changes) == 0,
-        "history_size": _history_count(),
+        "history_size": history_size,
         "env": "dev" if settings.env != "production" else "deploy",
     }
 
@@ -961,10 +1044,10 @@ def backtest_run(request: Request,
 
 @app.get("/api/backtest/cv/{league_id}", tags=["backtest"])
 def backtest_temporal_cv(league_id: int = Path(gt=0), n_folds: int = 5,
-                         user: str = Depends(current_user)):
+                          user: str = Depends(current_user)):
     n_folds = _clamp_limit(n_folds, 20)
-    from .backtest_engine import temporal_cv
-    return temporal_cv(league_id, n_folds)
+    from .backtest_engine import run_temporal_cv
+    return run_temporal_cv(league_id, n_folds)
 
 
 @app.get("/api/backtest/history", tags=["backtest"])
@@ -1075,6 +1158,30 @@ def _worker_healthy() -> bool:
         return False
 
 
+def _external_data_source_status() -> dict:
+    """Report durable successful-sync freshness without making an upstream call."""
+    max_age = settings.source_sync_max_age_seconds
+    try:
+        rows = db.run_query("SELECT last_sync FROM leagues ORDER BY last_sync DESC LIMIT 1")
+        if not rows:
+            return {"status": "not_configured", "last_sync": None,
+                    "age_seconds": None, "max_age_seconds": max_age}
+        last_sync = rows[0]["last_sync"]
+        if not last_sync:
+            return {"status": "degraded", "last_sync": None,
+                    "age_seconds": None, "max_age_seconds": max_age}
+        parsed = datetime.fromisoformat(str(last_sync).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()))
+        return {"status": "ok" if age_seconds <= max_age else "degraded",
+                "last_sync": last_sync, "age_seconds": age_seconds,
+                "max_age_seconds": max_age}
+    except Exception:
+        return {"status": "error", "last_sync": None,
+                "age_seconds": None, "max_age_seconds": max_age}
+
+
 @app.get("/api/health", tags=["misc"])
 def health():
     """Liveness only — the process is up and the app is responding.
@@ -1119,19 +1226,7 @@ def health_dependencies():
     """Safe dependency status. No secrets, stack traces, SQL, or paths leaked."""
     db_ok = _db_reachable()
 
-    # External data source: report freshness from durable state, never scrape.
-    external = {"status": "unknown", "last_sync": None}
-    try:
-        rows = db.run_query(
-            "SELECT last_sync FROM leagues ORDER BY last_sync DESC LIMIT 1")
-        if rows and rows[0]["last_sync"]:
-            external = {"status": "ok", "last_sync": rows[0]["last_sync"]}
-        elif rows:
-            external = {"status": "degraded", "last_sync": None}
-        else:
-            external = {"status": "not_configured", "last_sync": None}
-    except Exception:
-        external = {"status": "error", "last_sync": None}
+    external = _external_data_source_status()
 
     return {
         "database": {

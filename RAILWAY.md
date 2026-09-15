@@ -4,7 +4,13 @@ Railway deployment requires four services: API, worker, PostgreSQL and Redis.
 The old Render manifest was removed because it could not satisfy the production
 Redis and worker requirements.
 
-## Provision
+## Current Production Status
+
+The Railway API, standalone worker, PostgreSQL, Redis, public readiness, and
+UptimeRobot monitors were verified on 2026-09-13. This is operational evidence,
+not scientific model validation.
+
+## Provision / Recovery
 
 1. Create PostgreSQL and Redis services.
 2. Create API service from this repository using `railway.json` / `Dockerfile`.
@@ -25,9 +31,10 @@ AP2WEB_SECRET=<random value, at least 32 characters>
 AP2WEB_ORIGINS=https://<frontend-domain>
 AP2WEB_COOKIE_SECURE=true
 AP2WEB_ENFORCE_ROLES=true
+AP2WEB_REQUIRE_WORKER=true
 AP2WEB_RATE_LIMIT_STORAGE=redis
-AP2WEB_REDIS_URL=<Railway Redis URL>
-DATABASE_URL=<Railway PostgreSQL URL>
+AP2WEB_REDIS_URL=${{Redis.REDIS_URL}}
+DATABASE_URL=${{Postgres.DATABASE_URL}}
 ```
 
 ## Post-deploy Verification
@@ -38,5 +45,12 @@ DATABASE_URL=<Railway PostgreSQL URL>
 4. Restart API without losing PostgreSQL data.
 5. Verify Redis-backed rate limiting across API replicas if replicas are used.
 
-Do not declare deployment complete until the worker heartbeat/readiness feature
-and the Compose integration test described in `checklist.md` are complete.
+## Operations
+
+Use `GET /api/health` for liveness and `GET /api/ready` for dependency and
+worker readiness. UptimeRobot monitors both endpoints every five minutes with
+e-mail alerts. PostgreSQL must remain private except for a short, credential-
+rotated migration window. See `MIGRATION.md` for backup and restore procedures.
+
+Railway currently accepts `railway.json`, but its Config as Code format is
+deprecated; migrate to `.railway/railway.ts` before 2026-12-01.

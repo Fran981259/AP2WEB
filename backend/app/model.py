@@ -25,6 +25,14 @@ def poisson_pmf(k: float, lam: float) -> float:
     return math.exp(-lam) * lam**k / math.factorial(int(k))
 
 
+def gamma_poisson_pmf(k: int, alpha: float, beta: float) -> float:
+    """Posterior predictive for Poisson observations with Gamma(alpha, beta) rate."""
+    if alpha <= 0 or beta <= 0:
+        raise ValueError("Gamma parameters must be positive")
+    return math.exp(math.lgamma(k + alpha) - math.lgamma(alpha) - math.lgamma(k + 1)
+                    + alpha * math.log(beta / (beta + 1)) + k * math.log(1 / (beta + 1)))
+
+
 @dataclass
 class TeamInput:
     name: str
@@ -132,6 +140,20 @@ def build_matrix(lam_home: float, lam_away: float,
                 m[i][j] *= inv_total
 
     return m
+
+
+def build_gamma_poisson_matrix(home_alpha: float, home_beta: float,
+                               away_alpha: float, away_beta: float) -> list[list[float]]:
+    """Independent Gamma-Poisson posterior predictive score matrix.
+
+    Dixon-Coles is intentionally not applied here: its correction is calibrated
+    for Poisson lambdas and cannot be silently reused for a negative binomial.
+    """
+    home = [gamma_poisson_pmf(i, home_alpha, home_beta) for i in range(MAX_GOALS + 1)]
+    away = [gamma_poisson_pmf(i, away_alpha, away_beta) for i in range(MAX_GOALS + 1)]
+    total = sum(home) * sum(away)
+    return [[home[i] * away[j] / total for j in range(MAX_GOALS + 1)]
+            for i in range(MAX_GOALS + 1)]
 
 
 def _normalize(d: dict[str, float]) -> dict[str, float]:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import db
 
@@ -41,11 +41,7 @@ def _log_loss(prob_correct: float) -> float:
 
 
 def _normalize_prob(p: float) -> float:
-    """Normaliza probabilidade para 0-1. Se > 1.0, assume que está em %."""
-    if p is None:
-        return 0.5
-    if p > 1.0:
-        return p / 100.0
+    """Predictions are stored as decimal probabilities only."""
     return p
 
 
@@ -67,7 +63,7 @@ def _result_of_pick_v2(pick_type: str, pick_value: str, ft_home, ft_away,
         return {"result": hit, "brier": round(brier, 4), "log_loss": round(ll, 4)}
     if pick_type == "GOLS":
         total = fh + fa
-        m = re.match(r"^(over|under)_([0-9.]+)", pick_value)
+        m = re.fullmatch(r"(over|under)_([0-9]+(?:\.5)?)", pick_value)
         if not m:
             return None
         side, line = m.group(1), float(m.group(2))
@@ -111,28 +107,87 @@ def _resolve_fixture(p) -> tuple | None:
     return row[0]["score_home"], row[0]["score_away"]
 
 
+def _validate_pick(pick_type: str, pick_value: str) -> None:
+    valid = (
+        (pick_type == "1X2" and pick_value in {"1", "X", "2"})
+        or (pick_type == "GOLS" and re.fullmatch(
+            r"(?:over|under)_(?:0|[1-9][0-9]*)\.5", pick_value))
+        or (pick_type == "BTTS" and pick_value in {"sim", "nao"})
+    )
+    if not valid:
+        raise ValueError("jogada não suportada")
+
+
 def save_prediction(user_id, data: dict) -> dict:
     """data: {league_id, match_id?, home_team_id, away_team_id, home_name, away_name,
     match_date?, pick_type, pick_value, pick_label, prob, odd, payload, model_version, predicted_at}"""
-    model_version = data.get("model_version") or data.get("league_model_version") or "poisson_v2"
-    predicted_at = data.get("predicted_at") or data.get("prediction_created_at") or datetime.now().isoformat(timespec="seconds")
+    _validate_pick(data.get("pick_type"), data.get("pick_value"))
+    match_id = data.get("match_id")
+    match = db.run_query(
+        "SELECT m.id, m.league_id, m.home_team_id, m.away_team_id, m.kickoff_datetime, "
+        "m.match_date, m.status, th.name home_name, ta.name away_name "
+        "FROM matches m JOIN teams th ON th.id=m.home_team_id "
+        "JOIN teams ta ON ta.id=m.away_team_id WHERE m.id=?", (match_id,))
+    if not match:
+        raise ValueError("partida não encontrada")
+    match = dict(match[0])
+    if match["status"] != "scheduled":
+        raise ValueError("só é permitido salvar partidas agendadas")
+    kickoff = match["kickoff_datetime"]
+    if not kickoff:
+        raise ValueError("partida sem horário de início")
+    try:
+        kickoff_at = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+        if kickoff_at.tzinfo is None:
+            kickoff_at = kickoff_at.replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError("horário da partida inválido") from exc
+    if kickoff_at <= datetime.now(timezone.utc):
+        raise ValueError("só é permitido salvar partidas futuras")
+    for field in ("league_id", "home_team_id", "away_team_id"):
+        if data.get(field) != match[field]:
+            raise ValueError("partida não corresponde à liga ou aos times informados")
+
+    # Rebuild provenance from the canonical match instead of accepting client claims.
+    provenance = {}
+    try:
+        from .prediction import predict_match
+        provenance = predict_match(match_id).get("provenance") or {}
+    except Exception:
+        provenance = {}
+    provenance_fields = (
+        "model_version", "model_method", "feature_version", "data_snapshot_timestamp",
+        "as_of_timestamp", "training_window", "training_sample_size", "league_model_version",
+        "prediction_created_at", "source_data_freshness", "confidence_level", "fallback_reason",
+    )
+    canonical = {
+        **data,
+        "league_id": match["league_id"],
+        "match_id": match["id"],
+        "home_team_id": match["home_team_id"],
+        "away_team_id": match["away_team_id"],
+        "home_name": match["home_name"],
+        "away_name": match["away_name"],
+        "match_date": (kickoff or match["match_date"] or "")[:10] or None,
+        **{field: provenance.get(field) for field in provenance_fields},
+    }
+    model_version = canonical.get("model_version")
+    predicted_at = canonical.get("prediction_created_at") or datetime.now(timezone.utc).isoformat()
     pid = db.run_exec(
         "INSERT INTO predictions(user_id,league_id,match_id,home_team_id,away_team_id,"
         "home_name,away_name,match_date,pick_type,pick_value,pick_label,prob,odd,payload,model_version,model_method,feature_version,data_snapshot_timestamp,as_of_timestamp,training_window,training_sample_size,league_model_version,predicted_at,source_data_freshness,confidence_level,fallback_reason) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (user_id, data.get("league_id"), data.get("match_id"),
-         data.get("home_team_id"), data.get("away_team_id"),
-         data.get("home_name"), data.get("away_name"), data.get("match_date"),
-         data.get("pick_type"), data.get("pick_value"), data.get("pick_label"),
-         data.get("prob"), data.get("odd"),
-         json.dumps(data.get("payload", {}), ensure_ascii=False),
-         model_version, data.get("model_method"), data.get("feature_version"),
-         data.get("data_snapshot_timestamp"), data.get("as_of_timestamp"),
-         data.get("training_window"), data.get("training_sample_size"),
-         data.get("league_model_version"), predicted_at,
-         data.get("source_data_freshness"), data.get("confidence_level"), data.get("fallback_reason")))
-    # resolve na hora se a partida já tiver resultado
-    resolve_predictions(user_id)
+        (user_id, canonical.get("league_id"), canonical.get("match_id"),
+         canonical.get("home_team_id"), canonical.get("away_team_id"),
+          canonical.get("home_name"), canonical.get("away_name"), canonical.get("match_date"),
+          canonical.get("pick_type"), canonical.get("pick_value"), canonical.get("pick_label"),
+          canonical.get("prob"), canonical.get("odd"),
+          json.dumps(canonical.get("payload", {}), ensure_ascii=False),
+          model_version, canonical.get("model_method"), canonical.get("feature_version"),
+          canonical.get("data_snapshot_timestamp"), canonical.get("as_of_timestamp"),
+          canonical.get("training_window"), canonical.get("training_sample_size"),
+          canonical.get("league_model_version"), predicted_at,
+          canonical.get("source_data_freshness"), canonical.get("confidence_level"), canonical.get("fallback_reason")))
     row = db.run_query("SELECT * FROM predictions WHERE id=?", (pid,))[0]
     return dict(row)
 
@@ -197,7 +252,7 @@ def resolve_predictions(user_id) -> int:
     n = 0
     for p in db.run_query(
             "SELECT * FROM predictions WHERE user_id=? AND status='pending'", (user_id,)):
-        score = _resolve_match_id(p["match_id"]) or _resolve_fixture(p)
+        score = _resolve_match_id(p["match_id"]) if p["match_id"] is not None else _resolve_fixture(p)
         if score is None:
             continue
         # Usar _result_of_pick_v2 para obter brier e log_loss
@@ -209,4 +264,27 @@ def resolve_predictions(user_id) -> int:
             "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, log_loss=? WHERE id=?",
             ("correct" if res_dict["result"] else "wrong", res_dict["brier"], res_dict["log_loss"], p["id"]))
         n += 1
+    return n
+
+
+def resolve_predictions_for_match(match_id: int) -> int:
+    """Resolve only pending predictions attached to one completed match."""
+    score = _resolve_match_id(match_id)
+    if score is None:
+        return 0
+    n = 0
+    for p in db.run_query(
+            "SELECT * FROM predictions WHERE match_id=? AND status='pending'", (match_id,)):
+        prob_home = dict(p).get("prob", 0.5)
+        res_dict = _result_of_pick_v2(
+            p["pick_type"], p["pick_value"], score[0], score[1], prob_home)
+        if res_dict is None:
+            continue
+        # The pending condition makes concurrent/repeated syncs idempotent.
+        updated = db.run_exec(
+            "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, log_loss=? "
+            "WHERE id=? AND status='pending'",
+            ("correct" if res_dict["result"] else "wrong", res_dict["brier"],
+             res_dict["log_loss"], p["id"]))
+        n += updated
     return n

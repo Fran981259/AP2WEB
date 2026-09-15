@@ -19,7 +19,7 @@ import numpy as np
 from xgboost import XGBClassifier
 
 from . import db
-from .learning import _team_lambdas, _predict_probs
+from .learning import _team_lambdas, _predict_probs, get_model
 from .feature_engine import compute_match_stats
 
 LABELS = ("1", "X", "2")
@@ -46,7 +46,7 @@ def build_dataset(league_id: int, window: int = WINDOW) -> list[dict]:
         "SELECT m.id, m.kickoff_datetime, m.home_team_id, m.away_team_id, "
         "       m.score_home, m.score_away, m.xg_home, m.xg_away "
         "FROM matches m "
-        "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL "
+        "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL "
         "  AND m.home_team_id IS NOT NULL AND m.away_team_id IS NOT NULL "
         "ORDER BY m.kickoff_datetime, m.id", (league_id,))
 
@@ -68,38 +68,26 @@ def build_dataset(league_id: int, window: int = WINDOW) -> list[dict]:
             "n": n,
         }
 
-    for m in rows:
-        hid, aid = m["home_team_id"], m["away_team_id"]
-        fh = team_features(hid)
-        fa = team_features(aid)
-        sh, sa = float(m["score_home"]), float(m["score_away"])
-        xh = m["xg_home"] if m["xg_home"] is not None else sh
-        xa = m["xg_away"] if m["xg_away"] is not None else sa
-
-        evaluable = fh is not None and fa is not None \
-            and fh["n"] >= MIN_HISTORY and fa["n"] >= MIN_HISTORY
-
-        dataset.append({
-            "match_id": m["id"],
-            "kickoff": m["kickoff_datetime"],
-            "home_team_id": hid,
-            "away_team_id": aid,
-            "evaluable": evaluable,
-            "actual": _result(sh, sa),
-            # vetor de features (12): força ofensiva/defensiva gols+xG e forma
-            "X": ([fh["gf"], fh["ga"], fh["xgf"], fh["xga"], fh["ppg"], fh["n"],
-                   fa["gf"], fa["ga"], fa["xgf"], fa["xga"], fa["ppg"], fa["n"]]
-                  if evaluable else None),
-            # λs do Poisson para o MESMO instante (mesmo histórico)
-            "hist_home": list(hist[hid]) if hid in hist else [],
-            "hist_away": list(hist[aid]) if aid in hist else [],
-        })
-
-        # atualiza históricos DEPOIS de construir a linha (evita leakage)
-        hh = hist.setdefault(hid, deque(maxlen=window))
-        ah = hist.setdefault(aid, deque(maxlen=window))
-        hh.append({"gf": sh, "ga": sa, "xgf": xh, "xga": xa, "pts": _points(sh, sa)})
-        ah.append({"gf": sa, "ga": sh, "xgf": xa, "xga": xh, "pts": _points(sa, sh)})
+    index = 0
+    while index < len(rows):
+        kickoff = rows[index]["kickoff_datetime"]
+        batch = []
+        while index < len(rows) and rows[index]["kickoff_datetime"] == kickoff:
+            batch.append(rows[index])
+            index += 1
+        for m in batch:
+            hid, aid = m["home_team_id"], m["away_team_id"]
+            fh, fa = team_features(hid), team_features(aid)
+            sh, sa = float(m["score_home"]), float(m["score_away"])
+            evaluable = fh is not None and fa is not None and fh["n"] >= MIN_HISTORY and fa["n"] >= MIN_HISTORY
+            dataset.append({"match_id": m["id"], "kickoff": kickoff, "home_team_id": hid, "away_team_id": aid, "evaluable": evaluable, "actual": _result(sh, sa), "X": ([fh["gf"], fh["ga"], fh["xgf"], fh["xga"], fh["ppg"], fh["n"], fa["gf"], fa["ga"], fa["xgf"], fa["xga"], fa["ppg"], fa["n"]] if evaluable else None), "hist_home": list(hist[hid]) if hid in hist else [], "hist_away": list(hist[aid]) if aid in hist else []})
+        for m in batch:
+            hid, aid = m["home_team_id"], m["away_team_id"]
+            sh, sa = float(m["score_home"]), float(m["score_away"])
+            xh = m["xg_home"] if m["xg_home"] is not None else sh
+            xa = m["xg_away"] if m["xg_away"] is not None else sa
+            hist.setdefault(hid, deque(maxlen=window)).append({"gf": sh, "ga": sa, "xgf": xh, "xga": xa, "pts": _points(sh, sa)})
+            hist.setdefault(aid, deque(maxlen=window)).append({"gf": sa, "ga": sh, "xgf": xa, "xga": xh, "pts": _points(sa, sh)})
 
     return dataset
 
@@ -119,13 +107,17 @@ def _metrics(rows: list[dict], key: str) -> dict:
             "n": n}
 
 
-def compare_models(league_id: int, window: int = WINDOW,
+def compare_models(league_id: int, window: int | None = None,
                    retrain_every: int = 5) -> dict:
     """Compara, no MESMO conjunto de confrontos e MESMO instante temporal:
     XGBoost vs Poisson vs prior empírico (base ingênua probabilística).
 
     retrain_every: retreina o XGB a cada N jogos (custo × honestidade).
     """
+    model_config = get_model(league_id)
+    window = window or model_config["window"]
+    feature = model_config["feature"]
+    home_advantage = model_config["home_advantage"]
     ds = [r for r in build_dataset(league_id, window) if r["evaluable"]]
     if len(ds) < 30:
         return {"ok": False, "error": f"dados insuficientes ({len(ds)} confrontos)",
@@ -138,20 +130,19 @@ def compare_models(league_id: int, window: int = WINDOW,
     last_trained_at = -1
     model = None
 
-    for i, row in enumerate(ds):
+    i = 0
+    while i < len(ds):
+        kickoff = ds[i]["kickoff"]
+        batch_end = i + 1
+        while batch_end < len(ds) and ds[batch_end]["kickoff"] == kickoff:
+            batch_end += 1
         if i < MIN_HISTORY * 2:
+            i = batch_end
             continue
-        # ── Poisson: mesmo histórico, mesmo instante ──
         def selected(history):
             return [compute_match_stats({"score_home": h["gf"], "score_away": h["ga"],
-                                         "xg_home": h["xgf"], "xg_away": h["xga"]}, "blend")
+                                         "xg_home": h["xgf"], "xg_away": h["xga"]}, feature)
                     for h in reversed(history)]
-        hl = _team_lambdas(selected(row["hist_home"]), window, "blend")
-        al = _team_lambdas(selected(row["hist_away"]), window, "blend")
-        poi = _predict_probs(
-            {"gf_avg": hl.get("gf_avg", 1.2), "ga_avg": hl.get("ga_avg", 1.2)},
-            {"gf_avg": al.get("gf_avg", 1.2), "ga_avg": al.get("ga_avg", 1.2)},
-            1.15)
 
         # ── prior empírico (base ingênua probabilística) ──
         counts = np.bincount(y_all[:i], minlength=3)[:3]
@@ -163,28 +154,37 @@ def compare_models(league_id: int, window: int = WINDOW,
                 n_estimators=120, max_depth=3, learning_rate=0.08,
                 subsample=0.9, colsample_bytree=0.9,
                 reg_lambda=1.5, eval_metric="mlogloss",
-                objective="multi:softprob", num_class=3)
+                objective="multi:softprob", num_class=3, random_state=0)
             model.fit(X_all[:i], y_all[:i])
             last_trained_at = i
-        pb = model.predict_proba(X_all[i:i + 1])[0]
 
         def norm(p):
             s = sum(float(v) for v in p)
             return {LABELS[j]: float(p[j]) / s for j in range(3)}
 
-        evaluated.append({
-            "actual": row["actual"],
-            "poisson": {"probs": norm([poi[k] for k in LABELS]),
-                        "fav": max(LABELS, key=lambda k: poi[k])},
-            "xgb": {"probs": norm(pb),
-                    "fav": LABELS[int(np.argmax(pb))]},
-            "prior": {"probs": norm(prior),
-                      "fav": LABELS[int(np.argmax(prior))]},
-        })
+        # Predict a simultaneous kickoff as one batch: no fixture may train on
+        # another fixture whose result was unavailable at that same instant.
+        for row, pb in zip(ds[i:batch_end], model.predict_proba(X_all[i:batch_end])):
+            hl = _team_lambdas(selected(row["hist_home"]), window, feature)
+            al = _team_lambdas(selected(row["hist_away"]), window, feature)
+            poi = _predict_probs(
+                {"gf_avg": hl.get("gf_avg", 1.2), "ga_avg": hl.get("ga_avg", 1.2)},
+                {"gf_avg": al.get("gf_avg", 1.2), "ga_avg": al.get("ga_avg", 1.2)},
+                home_advantage)
+            evaluated.append({
+                "actual": row["actual"],
+                "poisson": {"probs": norm([poi[k] for k in LABELS]),
+                            "fav": max(LABELS, key=lambda k: poi[k])},
+                "xgb": {"probs": norm(pb), "fav": LABELS[int(np.argmax(pb))]},
+                "prior": {"probs": norm(prior), "fav": LABELS[int(np.argmax(prior))]},
+            })
+        i = batch_end
 
     comparison = {
         "league_id": league_id,
         "window": window,
+        "feature": feature,
+        "home_advantage": home_advantage,
         "retrain_every": retrain_every,
         "min_history": MIN_HISTORY,
         "evaluated_matches": len(evaluated),

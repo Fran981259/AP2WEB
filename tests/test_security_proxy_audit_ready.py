@@ -9,6 +9,8 @@ Covers the gaps closed in Steps 9-12 of the hardening plan:
 from __future__ import annotations
 
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -146,6 +148,33 @@ def test_health_dependencies_shape():
     # fresh DB seeds leagues without sync -> "degraded", never "error" (sqlite Row has no .get)
     assert body["external_data_source"]["status"] in ("ok", "degraded", "not_configured")
     assert body["external_data_source"]["status"] != "error"
+
+
+def test_health_dependencies_marks_old_source_sync_degraded():
+    previous = db.run_query("SELECT id,last_sync FROM leagues")
+    try:
+        db.run_exec("UPDATE leagues SET last_sync=?", ("2000-01-01T00:00:00+00:00",))
+        body = TestClient(app).get("/api/health/dependencies").json()["external_data_source"]
+        assert body["status"] == "degraded"
+        assert body["age_seconds"] > body["max_age_seconds"]
+        assert body["last_sync"] == "2000-01-01T00:00:00+00:00"
+    finally:
+        for row in previous:
+            db.run_exec("UPDATE leagues SET last_sync=? WHERE id=?", (row["last_sync"], row["id"]))
+
+
+def test_health_dependencies_accepts_current_source_sync():
+    previous = db.run_query("SELECT id,last_sync FROM leagues")
+    current = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    try:
+        db.run_exec("UPDATE leagues SET last_sync=?", (current,))
+        body = TestClient(app).get("/api/health/dependencies").json()["external_data_source"]
+        assert body["status"] == "ok"
+        assert body["age_seconds"] <= body["max_age_seconds"]
+        assert body["last_sync"] == current
+    finally:
+        for row in previous:
+            db.run_exec("UPDATE leagues SET last_sync=? WHERE id=?", (row["last_sync"], row["id"]))
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from typing import Optional
 from . import db
 
 logger = logging.getLogger("ap2web.jobs")
-ALLOWED_TYPES = {"sync_all","sync_league","calibrate_all","calibrate_league","backtest","health"}
+ALLOWED_TYPES = {"sync_all","sync_league","sync_odds","calibrate_all","calibrate_league","backtest","health"}
 
 
 class _JobCancelled(Exception):
@@ -75,6 +75,17 @@ def create_job(job_type: str, requested_by: int, league_id: int | None = None,
         active = db.run_query("SELECT * FROM jobs WHERE job_type='sync_league' AND league_id=? AND status IN ('pending','running')", (league_id,))
         if active:
             raise RuntimeError(f"Sync for league {league_id} already active id={active[0]['id']}")
+    # sync_all ingests every configured league, so it cannot overlap a targeted sync.
+    if job_type == "sync_all":
+        active = db.run_query(
+            "SELECT * FROM jobs WHERE job_type='sync_league' AND status='running' LIMIT 1")
+        if active:
+            raise RuntimeError(f"Targeted sync already active id={active[0]['id']}")
+    if job_type == "sync_league":
+        active = db.run_query(
+            "SELECT * FROM jobs WHERE job_type='sync_all' AND status='running' LIMIT 1")
+        if active:
+            raise RuntimeError(f"Full sync already active id={active[0]['id']}")
     try:
         jid = db.run_exec(
             "INSERT INTO jobs(job_type,status,requested_by,league_id,parameters,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,datetime('now'),datetime('now'))",
@@ -135,6 +146,23 @@ def _user_id_by_name(username: str) -> int | None:
 
 def claim_job(job_id: int, worker_id: str, lease_seconds: int = 60) -> bool:
     """Try to claim pending -> running with optimistic locking (PG safe)."""
+    job = get_job(job_id)
+    if not job:
+        return False
+    if job["job_type"] in ("sync_all", "sync_league"):
+        with db.transaction():
+            # PostgreSQL needs a shared lock because these claims update different job rows.
+            if db.MODE == "postgres":
+                db.run_query("SELECT pg_advisory_xact_lock(?)", (821539,))
+            job = get_job(job_id)
+            if not job or job["status"] != "pending":
+                return False
+            other_type = "sync_league" if job["job_type"] == "sync_all" else "sync_all"
+            active = db.run_query(
+                "SELECT 1 FROM jobs WHERE job_type=? AND status='running' LIMIT 1", (other_type,))
+            if active:
+                return False
+            return db.run_exec("UPDATE jobs SET status='running', started_at=datetime('now'), worker_id=?, lease_expires_at=?, attempt_count=attempt_count+1, updated_at=datetime('now') WHERE id=? AND status='pending'", (worker_id, _lease_until(lease_seconds), job_id)) == 1
     return db.run_exec("UPDATE jobs SET status='running', started_at=datetime('now'), worker_id=?, lease_expires_at=?, attempt_count=attempt_count+1, updated_at=datetime('now') WHERE id=? AND status='pending'", (worker_id, _lease_until(lease_seconds), job_id)) == 1
 
 
@@ -146,9 +174,10 @@ def complete_job(job_id: int, result: dict | None = None, progress: float = 1.0)
     db.run_exec("UPDATE jobs SET status='completed', idempotency_key=NULL, progress=?, result=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND status='running'", (progress, res_json, job_id))
     logger.info("job completed id=%s", job_id)
 
-def fail_job(job_id: int, error: str, attempt: int | None = None):
+def fail_job(job_id: int, error: str, attempt: int | None = None, result: dict | None = None):
     err = error[:2000]
-    db.run_exec("UPDATE jobs SET status='failed', idempotency_key=NULL, error_message=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND status='running'", (err, job_id))
+    res_json = json.dumps(result or {}, ensure_ascii=False)
+    db.run_exec("UPDATE jobs SET status='failed', idempotency_key=NULL, error_message=?, result=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND status='running'", (err, res_json, job_id))
     logger.warning("job failed id=%s error=%s", job_id, err[:200])
 
 def update_progress(job_id: int, progress: float, detail: str | None = None,
@@ -190,16 +219,21 @@ _worker_stop = threading.Event()
 def _run_one(job: dict, worker_id: str | None = None, lease_seconds: int = 60):
     jid = job["id"]
     jtype = job["job_type"]
+    raw_params = job.get("parameters") or "{}"
+    params = json.loads(raw_params) if isinstance(raw_params, str) else raw_params
     wid = worker_id or f"worker-{uuid.uuid4().hex[:6]}"
     if not claim_job(jid, wid, lease_seconds):
         return
     try:
+        def heartbeat() -> None:
+            renew_job_lease(jid, wid, lease_seconds)
+
         if jtype == "sync_all":
             from .sofascore_data import sync_league, load_leagues
 
             leagues = load_leagues()
             total = len(leagues)
-            ok = 0
+            results = []
             for i, cfg in enumerate(leagues):
                 cur = get_job(jid)
                 if cur and cur["status"] == "cancelled":
@@ -207,28 +241,46 @@ def _run_one(job: dict, worker_id: str | None = None, lease_seconds: int = 60):
                     return
                 update_progress(jid, (i) / total if total else 1.0, worker_id=wid, lease_seconds=lease_seconds)
                 try:
-                    r = sync_league(cfg)
-                    if r.get("ok"):
-                        ok += 1
-                except Exception:
+                    r = sync_league(cfg, heartbeat=heartbeat)
+                    results.append({"league": cfg.get("name"), **r})
+                except Exception as e:
                     logger.exception("sync league %s failed", cfg.get("name"))
+                    results.append({"league": cfg.get("name"), "ok": False, "error": str(e)})
                 time.sleep(0.2)
-            res = {"ok": True, "synced": ok, "total": total}
-            try:
-                from .prediction import invalidate_prediction_cache
-                invalidate_prediction_cache(None)
-            except Exception:
-                pass
-            complete_job(jid, res)
+            failed = [result for result in results if not result.get("ok")]
+            res = {"ok": not failed, "synced": total - len(failed), "total": total,
+                   "failed": failed, "results": results}
+            if failed:
+                fail_job(jid, f"{len(failed)} of {total} league syncs failed or were partial", result=res)
+            else:
+                try:
+                    from .prediction import invalidate_prediction_cache
+                    invalidate_prediction_cache(None)
+                except Exception:
+                    pass
+                complete_job(jid, res)
         elif jtype == "sync_league":
             from .sofascore_data import sync_league_local
             league_id = job["league_id"]
-            r = sync_league_local(league_id)
-            try:
-                from .prediction import invalidate_prediction_cache
-                invalidate_prediction_cache(league_id)
-            except Exception:
-                pass
+            r = sync_league_local(league_id, heartbeat=heartbeat)
+            if not r.get("ok"):
+                fail_job(jid, r.get("error", "league sync was partial"), result=r)
+            else:
+                try:
+                    from .prediction import invalidate_prediction_cache
+                    invalidate_prediction_cache(league_id)
+                except Exception:
+                    pass
+                complete_job(jid, r)
+
+        elif jtype == "sync_odds":
+            from .the_odds_api import sync_soccer_h2h
+            sport_key = params.get("sport_key")
+            if not sport_key:
+                raise ValueError("sync_odds requires sport_key")
+            r = sync_soccer_h2h(sport_key, params.get("region", "eu"))
+            if not r.get("ok"):
+                raise RuntimeError(r.get("reason", "odds sync failed"))
             complete_job(jid, r)
         elif jtype == "calibrate_all":
             from .learning import calibrate_all
@@ -263,7 +315,7 @@ def _run_one(job: dict, worker_id: str | None = None, lease_seconds: int = 60):
                                 lease_seconds=lease_seconds)
 
             try:
-                r = get_loop()._execute_cycle(league_ids, progress_cb=_progress)
+                r = get_loop()._execute_cycle(league_ids, progress_cb=_progress, source_job_id=jid)
                 cur = get_job(jid)
                 if cur and cur["status"] == "cancelled":
                     logger.info("job %s cancelled mid-run", jid)
@@ -296,7 +348,6 @@ def run_worker_loop(stop_event: threading.Event | None = None, worker_id: str | 
         try:
             if time.monotonic() >= next_heartbeat:
                 heartbeat_worker(worker_id)
-                recover_expired_jobs()
                 next_heartbeat = time.monotonic() + heartbeat_seconds
             pending = db.run_query("SELECT * FROM jobs WHERE status='pending' ORDER BY id LIMIT 5")
             for job in pending:

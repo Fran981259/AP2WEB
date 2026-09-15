@@ -27,8 +27,10 @@ def compute_match_stats(match: dict, feature: str) -> dict:
     """Select match features from home/away-oriented raw score and xG fields."""
     if feature not in {"goals", "xg", "blend"}:
         raise ValueError(f"Unknown feature: {feature}")
-    sh = float(match.get("score_home") or 0)
-    sa = float(match.get("score_away") or 0)
+    if match.get("score_home") is None or match.get("score_away") is None:
+        raise ValueError("Completed match requires both scores")
+    sh = float(match["score_home"])
+    sa = float(match["score_away"])
     xh = parse_stat_value(match.get("xg_home"))
     xa = parse_stat_value(match.get("xg_away"))
     gf, ga = sh, sa
@@ -75,7 +77,9 @@ def compute_team_stats(history, window: int, feature: str) -> dict:
 
 
 def window_stats(matches: list[dict], team_id: int, window: int, feature: str) -> dict:
-    rows = [team_match_stats(m, team_id, feature) for m in matches
+    # Callers may return rows in either chronological order; select recency here.
+    ordered = sorted(matches, key=lambda m: (m.get("kickoff_datetime") or "", m.get("id") or 0), reverse=True)
+    rows = [team_match_stats(m, team_id, feature) for m in ordered
             if team_id in (m["home_team_id"], m["away_team_id"])][:window]
     if not rows:
         return {"gf_avg": 1.2, "ga_avg": 1.2}

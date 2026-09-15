@@ -4,13 +4,14 @@ import { usePolling } from './hooks/usePolling.js'
 
 export default function App() {
   const [username, setUsername] = useState(null)
+  const [role, setRole] = useState('user')
   const [restoring, setRestoring] = useState(true)
 
   useEffect(() => {
     let active = true
     // Restauração de sessão via cookie HttpOnly (sem token em localStorage).
     api.me()
-      .then((data) => { if (active) setUsername(data.username) })
+      .then((data) => { if (active) { setUsername(data.username); setRole(data.role || 'user') } })
       .catch(() => {})
       .finally(() => { if (active) setRestoring(false) })
     setOnUnauthorized(() => { if (active) { setUsername(null); setRestoring(false) } })
@@ -19,11 +20,13 @@ export default function App() {
 
   function handleLogin(data) {
     setUsername(data.username)
+    setRole(data.role || 'user')
   }
 
   function handleLogout() {
     api.logout().catch(() => {})
     setUsername(null)
+    setRole('user')
   }
 
   if (restoring) {
@@ -35,7 +38,7 @@ export default function App() {
   }
   if (!username) return <AuthScreen onLogin={handleLogin} />
 
-  return <Dashboard username={username} token={null} onLogout={handleLogout} />
+  return <Dashboard username={username} role={role} token={null} onLogout={handleLogout} />
 }
 
 const FLAGS = {
@@ -174,8 +177,10 @@ function AuthScreen({ onLogin }) {
   )
 }
 
-function Dashboard({ username, token, onLogout }) {
+function Dashboard({ username, role, token, onLogout }) {
   const [tab, setTab] = useState('confronto')
+  const [showMethodNotice, setShowMethodNotice] = useState(true)
+  const canOperate = role === 'operator' || role === 'admin'
   const [leagues, setLeagues] = useState([])
   const [selLeague, setSelLeague] = useState(null)
   const [matches, setMatches] = useState([])
@@ -491,6 +496,12 @@ function Dashboard({ username, token, onLogout }) {
 
       {tab === 'confronto' && (
         <main>
+          {showMethodNotice && (
+            <div className="muted small" style={{ marginBottom: 12 }}>
+              Motor experimental: probabilidades e odds justas sao informativas. Mercado, EV e Kelly exigem quote externa timestampada.
+              <button className="btn-link" onClick={() => setShowMethodNotice(false)}>Ocultar</button>
+            </div>
+          )}
           <aside>
             <h3>Ligas no banco <span className="muted small">({leagues.length})</span></h3>
             <input className="search" placeholder="🔎 Buscar liga ou país..."
@@ -546,11 +557,10 @@ function Dashboard({ username, token, onLogout }) {
                     ))}
                   </select>
                 </label>
-                <button className="btn-small btn-demand" onClick={onCfDemand} disabled={loading || !cfLeague} title="Sincronizar esta liga no Sofascore">
+                <button className="btn-small btn-demand" onClick={onCfDemand} disabled={!canOperate || loading || !cfLeague} title="Sincronizar esta liga no Sofascore">
                   {loading ? 'Sincronizando...' : '📥 Sincronizar dados'}
                 </button>
               </div>
-
               {cfLeague && (
                 <div className="cf-form">
                   <label>
@@ -656,7 +666,7 @@ function Dashboard({ username, token, onLogout }) {
                       <td><b>{h.home_name}</b> x <b>{h.away_name}</b></td>
                       <td>{h.pick_label}</td>
                       <td>{h.prob}%</td>
-                      <td>@{h.odd}</td>
+                       <td>Justa @{h.odd}</td>
                       <td>{h.created_at}</td>
                       <td><button className="btn-small" onClick={() => onDeletePrediction(h.id)}>✕</button></td>
                     </tr>
@@ -676,7 +686,7 @@ function Dashboard({ username, token, onLogout }) {
                 <h3>🧠 Aprendizado do motor</h3>
                 <p className="muted small">Fator de mando (HA) e janela deslizante calibrados por liga via backtest honesto (prevê cada jogo usando só os jogos anteriores).</p>
               </div>
-              <button className="btn-primary" onClick={startCalibration} disabled={loading || ['pending', 'running'].includes(cal?.status)}>
+              <button className="btn-primary" onClick={startCalibration} disabled={!canOperate || loading || ['pending', 'running'].includes(cal?.status)}>
                 {['pending', 'running'].includes(cal?.status) ? `Calibrando ${Math.round((cal.progress || 0) * 100)}%...` : '⚡ Recalibrar todas'}
               </button>
             </div>
@@ -1116,8 +1126,8 @@ function Dashboard({ username, token, onLogout }) {
               <div>
                 <h3>🔬 Backtest Engine</h3>
                 <p className="muted small">
-                  Ciclo contínuo de backtest, cross-validation temporal e meta-learning.
-                  O sistema aprende com erros anteriores e recalibra automaticamente.
+                  Execuções manuais experimentais de backtest e cross-validation temporal.
+                  Resultados não promovem automaticamente modelos de produção.
                 </p>
               </div>
               <div className="btn-row">
@@ -1265,10 +1275,10 @@ function Dashboard({ username, token, onLogout }) {
           <section className="panel">
             <div className="panel-head">
               <div>
-                <h4>🧠 Meta-Learning (Bayesian Optimization)</h4>
+                <h4>🧠 Busca heurística experimental</h4>
                 <p className="muted small">
-                  Histórico de hiperparâmetros testados e seus resultados.
-                  O sistema aprende quais combinações funcionam melhor.
+                  Histórico local de hiperparâmetros testados; não é otimização Bayesiana
+                  nem evidência para promoção de modelo.
                 </p>
               </div>
               <button className="btn-small" onClick={loadBtStatus}>🔄 Atualizar</button>
@@ -1591,19 +1601,18 @@ function PredictionView({ p, token, onSave }) {
     const p1 = probs['1x2']
     const fav = Object.keys(p1).reduce((a, b) => p1[a] >= p1[b] ? a : b)
     const favName = fav === '1' ? match.home : fav === '2' ? match.away : 'Empate'
-    opts.push({ type: '1X2', value: fav, label: `1X2: ${favName}`, prob: Math.round(p1[fav] * 1000) / 10 })
+    opts.push({ type: '1X2', value: fav, label: `1X2: ${favName}`, prob: p1[fav] })
     for (const line of [1.5, 2.5]) {
       const ov = probs['over'][`over_${line}`]
       const un = probs['under'][`under_${line}`]
-      if (ov >= un) opts.push({ type: 'GOLS', value: `over_${line}`, label: `Over ${line}`, prob: Math.round(ov * 1000) / 10 })
-      else opts.push({ type: 'GOLS', value: `under_${line}`, label: `Under ${line}`, prob: Math.round(un * 1000) / 10 })
+      if (ov >= un) opts.push({ type: 'GOLS', value: `over_${line}`, label: `Over ${line}`, prob: ov })
+      else opts.push({ type: 'GOLS', value: `under_${line}`, label: `Under ${line}`, prob: un })
     }
     const btts = probs['btts']
-    if (btts['sim'] >= 0.5) opts.push({ type: 'BTTS', value: 'sim', label: 'BTTS Sim', prob: Math.round(btts['sim'] * 1000) / 10 })
-    else opts.push({ type: 'BTTS', value: 'nao', label: 'BTTS Não', prob: Math.round(btts['nao'] * 1000) / 10 })
-    if (top_scores[0]) opts.push({ type: 'PLACAR', value: top_scores[0].score, label: `Placar ${top_scores[0].score}`, prob: top_scores[0].prob })
+    if (btts['sim'] >= 0.5) opts.push({ type: 'BTTS', value: 'sim', label: 'BTTS Sim', prob: btts['sim'] })
+    else opts.push({ type: 'BTTS', value: 'nao', label: 'BTTS Não', prob: btts['nao'] })
     return opts
-  }, [probs, top_scores, match])
+  }, [probs, match])
 
   useEffect(() => { setPicked(null); setRisk(null) }, [p])
 
@@ -1618,7 +1627,7 @@ function PredictionView({ p, token, onSave }) {
 
   function save() {
     if (!picked) { alert('Escolha uma jogada para salvar'); return }
-    const odd = picked.prob > 0 ? (100 / picked.prob).toFixed(2) : '—'
+    const odd = picked.prob > 0 ? (1 / picked.prob).toFixed(2) : '—'
     onSave({
       league_id: match.league_id || null,
       match_id: match.id || null,
@@ -1697,8 +1706,13 @@ function PredictionView({ p, token, onSave }) {
                 <Stat label="Sinais" value={risk.summary.total_signals} ok={risk.summary.any_value} />
                 <Stat label="Stake sugerida" value={`${risk.summary.total_stake_suggested} u`} />
                 <Stat label="Exposição" value={`${risk.summary.total_exposure_pct}%`} />
-                <Stat label="Vig" value={`${(risk.market.vig * 100).toFixed(1)}%`} />
+                <Stat label="Mercado externo" value={risk.market.market_available ? 'Disponível' : 'Indisponível'} />
               </div>
+              {risk.market.market_quote && (
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  Quote externa: {risk.market.market_quote.provider} · capturada em {risk.market.market_quote.captured_at}
+                </p>
+              )}
 
               {risk.signals.length > 0 && (
                 <div className="table-scroll" style={{ marginTop: 10 }}>
@@ -1707,9 +1721,9 @@ function PredictionView({ p, token, onSave }) {
                       <tr>
                         <th>Jogada</th>
                         <th>Prob.</th>
-                        <th>Odd justa</th>
-                        <th>Odd mercado</th>
-                        <th>Edge</th>
+                         <th>Odd justa do modelo</th>
+                         <th>Odd externa</th>
+                         <th>EV esperado</th>
                         <th>Kelly</th>
                         <th>Stake</th>
                         <th>Score</th>
@@ -1741,8 +1755,8 @@ function PredictionView({ p, token, onSave }) {
 
               {risk.signals.length === 0 && (
                 <p className="muted small" style={{ marginTop: 8 }}>
-                  Nenhum value bet encontrado com os critérios atuais.
-                  Ajuste Kelly/banca ou espere por jogos com edge positivo.
+                  Odds externas não foram integradas. Fair odds são apenas referência
+                  do modelo e não geram edge, Kelly ou recomendação de aposta.
                 </p>
               )}
 
@@ -1787,7 +1801,7 @@ function PredictionView({ p, token, onSave }) {
                 <div className="bar-track">
                   <div className="bar-fill" style={{ width: `${v * 100}%` }} />
                 </div>
-                <div className="bar-val">{(v * 100).toFixed(1)}% <span className="odd">@{probs['odds_1x2'][k]}</span></div>
+                 <div className="bar-val">{(v * 100).toFixed(1)}% <span className="odd">Justa @{probs['odds_1x2'][k]}</span></div>
               </div>
             )
           })}
@@ -1802,7 +1816,7 @@ function PredictionView({ p, token, onSave }) {
                 <div className="bar-track">
                   <div className="bar-fill over" style={{ width: `${ov * 100}%` }} />
                 </div>
-                <div className="bar-val">{(ov * 100).toFixed(1)}% <span className="odd">@{ov > 0 ? (1 / ov).toFixed(2) : '—'}</span>
+                 <div className="bar-val">{(ov * 100).toFixed(1)}% <span className="odd">Justa @{ov > 0 ? (1 / ov).toFixed(2) : '—'}</span>
                   <span className="muted small">U{un > 0 ? (1 / un).toFixed(2) : '—'}</span></div>
               </div>
             )
@@ -1813,7 +1827,7 @@ function PredictionView({ p, token, onSave }) {
               <div className="bar-fill btts" style={{ width: `${probs['btts']['sim'] * 100}%` }} />
             </div>
             <div className="bar-val">{(probs['btts']['sim'] * 100).toFixed(1)}%
-              <span className="odd">@{probs['btts']['sim'] > 0 ? (1 / probs['btts']['sim']).toFixed(2) : '—'}</span></div>
+              <span className="odd">Justa @{probs['btts']['sim'] > 0 ? (1 / probs['btts']['sim']).toFixed(2) : '—'}</span></div>
           </div>
         </Card>
         <Card title="Heatmap Poisson">
@@ -1827,7 +1841,7 @@ function PredictionView({ p, token, onSave }) {
             <div className="row-odds" key={s.score}>
               <span>{s.score}</span>
               <span className="pct">{s.prob}%</span>
-              <span className="odd">@{s.odd}</span>
+              <span className="odd">Justa @{s.odd}</span>
             </div>
           ))}
         </Card>
@@ -1851,7 +1865,7 @@ function PredictionView({ p, token, onSave }) {
             <option value="">— escolha —</option>
             {pickOptions.map((o, i) => (
               <option key={i} value={JSON.stringify({ t: o.type, v: o.value })}>
-                {o.label} ({o.prob}%)
+                {o.label} ({(o.prob * 100).toFixed(1)}%)
               </option>
             ))}
           </select>

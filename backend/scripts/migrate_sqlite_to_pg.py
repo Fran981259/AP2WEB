@@ -20,11 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Parents must precede children so explicit IDs keep their references valid.
 TABLES = (
     "users", "leagues", "teams", "matches", "predictions", "league_models",
-    "workers", "jobs", "auth_sessions", "audit_events",
+    "workers", "jobs", "auth_sessions", "audit_events", "execution_events",
 )
 ID_TABLES = frozenset({
     "users", "leagues", "teams", "matches", "predictions", "jobs",
-    "auth_sessions", "audit_events",
+    "auth_sessions", "audit_events", "execution_events",
 })
 
 

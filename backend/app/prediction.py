@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from . import db
 from .context_features import adjust_lambdas
 from .feature_engine import team_match_stats, window_stats
 from .learning import get_model
 from .model import (
-    MatchInput, TeamInput, build_matrix, probabilities, top_scores,
+    MatchInput, TeamInput, build_matrix, build_gamma_poisson_matrix, probabilities, top_scores,
     proposals as build_proposals, predict as run_predict,
 )
 from .bayesian import (
@@ -51,10 +52,13 @@ def _kickoff_ts(kickoff: str | None) -> float | None:
 
 
 def _context_flags(model: dict) -> dict:
+    # Contextual modifiers are not yet evaluated by the canonical walk-forward
+    # backtest. Do not silently activate an unvalidated production path.
+    del model
     return {
-        "rest": int(model.get("ctx_rest", 0) or 0),
-        "form": int(model.get("ctx_form", 0) or 0),
-        "team_ha": int(model.get("ctx_team_ha", 0) or 0),
+        "rest": 0,
+        "form": 0,
+        "team_ha": 0,
     }
 
 
@@ -105,6 +109,7 @@ def _played_rows(cols: str, extra_where: str, params: list,
         "JOIN teams th ON th.id=m.home_team_id "
         "JOIN teams ta ON ta.id=m.away_team_id "
         "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL "
+        "AND m.score_away IS NOT NULL "
         f"{extra_where} "
     )
     all_params = list(params)
@@ -163,7 +168,7 @@ def _get_bayesian_engine(league_id: int) -> BayesianEngine:
             "FROM matches m "
             "JOIN teams th ON th.id=m.home_team_id "
             "JOIN teams ta ON ta.id=m.away_team_id "
-            "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL "
+            "WHERE m.league_id=? AND m.status='played' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL "
             "ORDER BY m.kickoff_datetime",
             (league_id,)
         )]
@@ -171,12 +176,11 @@ def _get_bayesian_engine(league_id: int) -> BayesianEngine:
     return _BAYESIAN_ENGINES[league_id]
 
 
-def _avg_stats_bayesian(league_id: int, team_id: int, window: int,
+def _avg_stats_bayesian(league_id: int, team_id: int, window: int, feature: str,
                         as_of_timestamp: str | None = None) -> dict:
     """Posterior Gamma ACUMULADO sobre TODAS as partidas anteriores a `as_of`.
 
-    Semântica do experimento B/C da FASE 13 (scripts/bayesian_experiment.py):
-    o posterior cresce com todo o histórico já visto — não é limitado à janela.
+    O posterior cresce com todo o histórico já visto — não é limitado à janela.
     Corrigido na auditoria: o engine é criado do zero com o prior e atualizado
     apenas com as partidas anteriores a `as_of` (filtro temporal), eliminando
     (1) a dupla contagem dos jogos recentes e (2) o vazamento de jogos futuros
@@ -187,10 +191,10 @@ def _avg_stats_bayesian(league_id: int, team_id: int, window: int,
     """
     query = (
         "SELECT m.kickoff_datetime, m.home_team_id, m.away_team_id, "
-        "m.score_home, m.score_away "
+        "m.score_home, m.score_away, m.xg_home, m.xg_away "
         "FROM matches m "
         "WHERE m.league_id=? AND (m.home_team_id=? OR m.away_team_id=?) "
-        "  AND m.status='played' AND m.score_home IS NOT NULL "
+        "  AND m.status='played' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL "
     )
     params = [league_id, team_id, team_id]
     if as_of_timestamp:
@@ -201,14 +205,14 @@ def _avg_stats_bayesian(league_id: int, team_id: int, window: int,
     n = len(rows)
     if not rows:
         return {"gf_avg": 1.3 / 5.0, "ga_avg": 1.3 / 5.0,
+                "gf_alpha": 1.3, "gf_beta": 5.0, "ga_alpha": 1.3, "ga_beta": 5.0,
                 "bayesian_weight": 0.0, "games_observed": 0}
 
     engine = BayesianEngine()
     for r in rows:
         r = dict(r)
-        home_side = r["home_team_id"] == team_id
-        gf = float(r["score_home"] if home_side else r["score_away"])
-        ga = float(r["score_away"] if home_side else r["score_home"])
+        selected = team_match_stats(r, team_id, feature)
+        gf, ga = selected["gf"], selected["ga"]
         engine.update_team(team_id, f"Team {team_id}", gf=gf, ga=ga)
 
     state = engine.teams.get(team_id)
@@ -217,11 +221,51 @@ def _avg_stats_bayesian(league_id: int, team_id: int, window: int,
         return {
             "gf_avg": state.lambda_gf,
             "ga_avg": state.lambda_ga,
+            "gf_alpha": state.alpha_gf,
+            "gf_beta": state.beta_gf,
+            "ga_alpha": state.alpha_ga,
+            "ga_beta": state.beta_ga,
             "bayesian_weight": weight,
             "games_observed": n,
         }
     return {"gf_avg": 1.3 / 5.0, "ga_avg": 1.3 / 5.0,
+            "gf_alpha": 1.3, "gf_beta": 5.0, "ga_alpha": 1.3, "ga_beta": 5.0,
             "bayesian_weight": 0.0, "games_observed": 0}
+
+
+def _match_gamma(home: dict, away: dict, home_advantage: float) -> tuple[float, float, float, float]:
+    """Moment-match attack and opposing-defense Gamma posteriors for a match."""
+    def combine(alpha_a, beta_a, alpha_b, beta_b):
+        mean = (alpha_a / beta_a + alpha_b / beta_b) / 2
+        variance = (alpha_a / beta_a ** 2 + alpha_b / beta_b ** 2) / 4
+        return mean ** 2 / variance, mean / variance
+
+    ha, hb = combine(home["gf_alpha"], home["gf_beta"], away["ga_alpha"], away["ga_beta"])
+    aa, ab = combine(away["gf_alpha"], away["gf_beta"], home["ga_alpha"], home["ga_beta"])
+    # Scaling a Gamma rate by c keeps alpha and changes beta to beta/c.
+    return ha, hb / home_advantage, aa, ab
+
+
+def _run_bayesian_predict(home: dict, away: dict, home_advantage: float,
+                          home_name: str, away_name: str):
+    ha, hb, aa, ab = _match_gamma(home, away, home_advantage)
+    matrix = build_gamma_poisson_matrix(ha, hb, aa, ab)
+    probs = probabilities(matrix)
+    lambdas = {"home": round(ha / hb, 4), "away": round(aa / ab, 4)}
+    return SimpleNamespace(lambdas=lambdas, probs=probs,
+                           top_scores=top_scores(probs["scores"]),
+                           proposals=build_proposals(probs, {"home": home_name, "away": away_name}, lambdas),
+                           model_type="gamma_poisson")
+
+
+def _with_posterior_means(stats: dict, gf_mean: float, ga_mean: float) -> dict:
+    """Retain posterior uncertainty while applying an explicit hybrid mean."""
+    out = dict(stats)
+    for prefix, mean in (("gf", gf_mean), ("ga", ga_mean)):
+        variance = stats[f"{prefix}_alpha"] / stats[f"{prefix}_beta"] ** 2
+        out[f"{prefix}_alpha"] = mean ** 2 / variance
+        out[f"{prefix}_beta"] = mean / variance
+    return out
 
 
 def _avg_stats_detail(league_id: int, team_id: int, window: int, feature: str,
@@ -369,9 +413,13 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
             "round": match.get("round"),
         })
 
-    # provenance
+    # Provenance freshness is when source data entered this system, not when a
+    # historical fixture happened. Legacy rows fall back to the durable league sync.
     try:
-        snap_row = db.run_query("SELECT MAX(kickoff_datetime) m FROM matches WHERE league_id=? AND status='played'", (league_id,))
+        snap_row = db.run_query(
+            "SELECT COALESCE(MAX(source_ingested_at), "
+            "(SELECT last_sync FROM leagues WHERE id=?)) m FROM matches WHERE league_id=?",
+            (league_id, league_id))
         data_snapshot = snap_row[0]["m"] if snap_row and snap_row[0]["m"] else None
     except Exception:
         data_snapshot = None
@@ -450,15 +498,12 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
         },
     }
 
-    # FASE 13: método de produção bayesian/hybrid troca o oper por estimativas
-    # Gamma-Posterior (bayesian = posterior puro; hybrid = blend MLE↔posterior).
-    # Ajustado na auditoria: posterior calculado sobre a JANELA as-of (sem dupla
-    # contagem e sem vazar jogos futuros); hybrid usa bayesian_lambda_blend real.
+    # Bayesian and hybrid consume the same selected feature as the Poisson path.
     oper = result
     model_method = model.get("method", "poisson")
     if _should_use_bayesian(model_method, use_bayesian):
-        bay_home = _avg_stats_bayesian(league_id, home_team_id, window, as_of_timestamp)
-        bay_away = _avg_stats_bayesian(league_id, away_team_id, window, as_of_timestamp)
+        bay_home = _avg_stats_bayesian(league_id, home_team_id, window, feature, as_of_timestamp)
+        bay_away = _avg_stats_bayesian(league_id, away_team_id, window, feature, as_of_timestamp)
 
         if model_method in ("bayesian", "hybrid"):
             if model_method == "hybrid":
@@ -470,19 +515,10 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
                     bay_away["gf_avg"], bay_away["ga_avg"],
                     away_stats["gf_avg"], away_stats["ga_avg"],
                     bay_away.get("games_observed", window))
-                mi_op = MatchInput(
-                    league=league_name,
-                    home=TeamInput(name=home_name, gf_avg=mix_h[0], ga_avg=mix_h[1]),
-                    away=TeamInput(name=away_name, gf_avg=mix_a[0], ga_avg=mix_a[1]),
-                )
-            else:
-                mi_op = MatchInput(
-                    league=league_name,
-                    home=TeamInput(name=home_name, gf_avg=bay_home["gf_avg"], ga_avg=bay_home["ga_avg"]),
-                    away=TeamInput(name=away_name, gf_avg=bay_away["gf_avg"], ga_avg=bay_away["ga_avg"]),
-                )
-            result_bay = run_predict(mi_op, home_advantage=model["home_advantage"],
-                                     rho=model.get("rho", 0.0))
+            result_bay = _run_bayesian_predict(
+                bay_home if model_method == "bayesian" else _with_posterior_means(bay_home, *mix_h),
+                bay_away if model_method == "bayesian" else _with_posterior_means(bay_away, *mix_a),
+                model["home_advantage"], home_name, away_name)
             oper = result_bay
             response["bayesian"] = {
                 "lambdas": result_bay.lambdas,
@@ -503,13 +539,8 @@ def _build(league_id: int, home_team_id: int, away_team_id: int,
             response["model"]["method"] = model_method
         else:
             # método poisson: bayesiano apenas como referência (produção intacta)
-            mi_bay = MatchInput(
-                league=league_name,
-                home=TeamInput(name=home_name, gf_avg=bay_home["gf_avg"], ga_avg=bay_home["ga_avg"]),
-                away=TeamInput(name=away_name, gf_avg=bay_away["gf_avg"], ga_avg=bay_away["ga_avg"]),
-            )
-            result_bay = run_predict(mi_bay, home_advantage=model["home_advantage"],
-                                     rho=model.get("rho", 0.0))
+            result_bay = _run_bayesian_predict(bay_home, bay_away, model["home_advantage"],
+                                                home_name, away_name)
             response["bayesian"] = {
                 "lambdas": result_bay.lambdas,
                 "probs": result_bay.probs,
@@ -561,8 +592,18 @@ def predict_match(match_id: int, as_of_timestamp: str | None = None, use_bayesia
     if not rows:
         raise IndexError("Partida não encontrada")
     m = rows[0]
+    kickoff = m["kickoff_datetime"]
+    cutoff = as_of_timestamp or kickoff
+    if as_of_timestamp and kickoff:
+        try:
+            if datetime.fromisoformat(as_of_timestamp.replace("Z", "+00:00")) > datetime.fromisoformat(kickoff.replace("Z", "+00:00")):
+                raise ValueError("as_of_timestamp cannot be after the match kickoff")
+        except ValueError as exc:
+            if str(exc).startswith("as_of_timestamp"):
+                raise
+            raise ValueError("as_of_timestamp must be ISO-8601") from exc
     return _build(m["league_id"], m["home_team_id"], m["away_team_id"],
-                  m["home_name"], m["away_name"], m["league_name"], m, as_of_timestamp, use_bayesian)
+                  m["home_name"], m["away_name"], m["league_name"], m, cutoff, use_bayesian)
 
 
 def predict_league_upcoming(league_id: int, limit: int = 10,

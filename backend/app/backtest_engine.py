@@ -18,7 +18,9 @@ Fluxo por ciclo:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 import os
 import threading
@@ -27,13 +29,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import db
+from . import db, execution_store
 from .feature_engine import compute_team_stats, compute_match_stats
 from .learning import (
     backtest_league, calibrate_league, get_model,
     FEATURE_GRID, WINDOW_GRID, HOME_ADVANTAGE_GRID, RHO_GRID, MIN_SAMPLES,
 )
 from .model import MatchInput, TeamInput, predict as run_predict
+from .scientific_protocol import build_snapshot_manifest
+
+logger = logging.getLogger("ap2web.backtest")
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -42,6 +47,56 @@ _DATA_DIR = Path(__file__).resolve().parent / "data"
 _HISTORY_FILE = _DATA_DIR / "backtest_history.jsonl"
 _STATE_FILE = _DATA_DIR / "backtest_state.json"
 _META_FILE = _DATA_DIR / "meta_learner.json"
+
+
+def _snapshot_metadata(league_id: int | None) -> tuple[dict, dict]:
+    """Capture the immutable completed-match manifest without storing its full rows twice."""
+    manifest = build_snapshot_manifest(league_id)
+    return manifest, {key: value for key, value in manifest.items() if key != "matches"}
+
+
+def _content_hash(value: dict) -> str:
+    return hashlib.sha256(execution_store.canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _finish_execution(execution_id: str, status: str, results: dict) -> None:
+    """Record the terminal state without obscuring the backtest's original exception."""
+    try:
+        execution_store.finish(
+            execution_id=execution_id,
+            status=status,
+            artifact_content_hash=_content_hash(results),
+            results=results,
+        )
+    except Exception:
+        logger.exception("could not finish backtest execution %s", execution_id)
+
+
+def run_single_league_backtest(league_id: int) -> dict:
+    """Run the legacy single-league backtest with an auditable execution lifecycle."""
+    _manifest, snapshot = _snapshot_metadata(league_id)
+    parameters = {
+        "scope": "single_league",
+        "league_id": league_id,
+        # These are the existing backtest_league defaults used by this endpoint.
+        "effective_parameters": {"home_adv": 1.15, "window": 10, "feature": "xg", "rho": 0.0},
+    }
+    execution = execution_store.start(
+        execution_type="backtest", snapshot_hash=snapshot["hash"], parameters=parameters)
+    try:
+        result = backtest_league(league_id)
+    except Exception as error:
+        _finish_execution(execution["execution_id"], "failed", {
+            "snapshot_manifest": snapshot,
+            "error": str(error)[:2000],
+        })
+        raise
+    _finish_execution(execution["execution_id"], "completed", {
+        "snapshot_manifest": snapshot,
+        "metrics": result,
+        "results": result,
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -104,41 +159,32 @@ def temporal_cv(league_id: int, n_folds: int = 5,
             hh.appendleft({"gf": gh, "ga": ga})
             ah.appendleft({"gf": ga, "ga": gh})
 
-        # Testa nos jogos do fold
-        for m in test_matches:
-            hid, aid = m["home_team_id"], m["away_team_id"]
-            hh = hist.get(hid)
-            ah = hist.get(aid)
-            if hh is not None and ah is not None and len(hh) > 0 and len(ah) > 0:
+        # Test simultaneous fixtures before adding any of their outcomes.
+        index = 0
+        while index < len(test_matches):
+            kickoff = test_matches[index]["kickoff_datetime"]
+            batch = []
+            while index < len(test_matches) and test_matches[index]["kickoff_datetime"] == kickoff:
+                batch.append(test_matches[index])
+                index += 1
+            for m in batch:
+                hid, aid = m["home_team_id"], m["away_team_id"]
+                hh, ah = hist.get(hid), hist.get(aid)
+                if hh is None or ah is None or not hh or not ah:
+                    continue
                 home_l = compute_team_stats(hh, window, feature)
                 away_l = compute_team_stats(ah, window, feature)
-                mi = MatchInput(
-                    home=TeamInput(name="h", gf_avg=home_l.get("gf_avg", 0),
-                                   ga_avg=home_l.get("ga_avg", 0)),
-                    away=TeamInput(name="a", gf_avg=away_l.get("gf_avg", 0),
-                                   ga_avg=away_l.get("ga_avg", 0)),
-                )
+                mi = MatchInput(home=TeamInput(name="h", gf_avg=home_l.get("gf_avg", 0), ga_avg=home_l.get("ga_avg", 0)), away=TeamInput(name="a", gf_avg=away_l.get("gf_avg", 0), ga_avg=away_l.get("ga_avg", 0)))
                 p = run_predict(mi, home_advantage=home_adv, rho=rho).probs["1x2"]
-                actual = "1" if m["score_home"] > m["score_away"] else (
-                    "X" if m["score_home"] == m["score_away"] else "2")
-                fav = max(p, key=p.get)
-                hit = int(fav == actual)
-                correct += hit
+                actual = "1" if m["score_home"] > m["score_away"] else ("X" if m["score_home"] == m["score_away"] else "2")
+                correct += int(max(p, key=p.get) == actual)
                 brier_sum += (1 - p[actual]) ** 2 + sum(p[k] ** 2 for k in p if k != actual)
                 total += 1
-
-            # Adiciona ao histórico para o próximo fold
-            gm = compute_match_stats({
-                "score_home": m["score_home"],
-                "score_away": m["score_away"],
-                "xg_home": m["xg_home"],
-                "xg_away": m["xg_away"],
-            }, feature)
-            gh, ga = gm["gf"], gm["ga"]
-            hh = hist.setdefault(hid, deque(maxlen=window))
-            ah = hist.setdefault(aid, deque(maxlen=window))
-            hh.appendleft({"gf": gh, "ga": ga})
-            ah.appendleft({"gf": ga, "ga": gh})
+            for m in batch:
+                hid, aid = m["home_team_id"], m["away_team_id"]
+                gm = compute_match_stats({"score_home": m["score_home"], "score_away": m["score_away"], "xg_home": m["xg_home"], "xg_away": m["xg_away"]}, feature)
+                hist.setdefault(hid, deque(maxlen=window)).appendleft({"gf": gm["gf"], "ga": gm["ga"]})
+                hist.setdefault(aid, deque(maxlen=window)).appendleft({"gf": gm["ga"], "ga": gm["gf"]})
 
         if total > 0:
             folds.append({
@@ -172,6 +218,44 @@ def temporal_cv(league_id: int, n_folds: int = 5,
         "total_matches": len(matches),
         "n_folds": len(folds),
     }
+
+
+def run_temporal_cv(league_id: int, n_folds: int = 5) -> dict:
+    """Run the public CV operation with an auditable execution lifecycle."""
+    _manifest, snapshot = _snapshot_metadata(league_id)
+    parameters = {
+        "scope": "temporal_cv_endpoint",
+        "league_id": league_id,
+        "requested_n_folds": n_folds,
+        "effective_parameters": {
+            "feature": "xg", "window": 10, "home_adv": 1.15, "rho": 0.0,
+        },
+    }
+    execution = execution_store.start(
+        execution_type="temporal_cv", snapshot_hash=snapshot["hash"], parameters=parameters)
+    try:
+        result = temporal_cv(league_id, n_folds)
+    except Exception as error:
+        _finish_execution(execution["execution_id"], "failed", {
+            "snapshot_manifest": snapshot,
+            "error": str(error)[:2000],
+        })
+        raise
+    _finish_execution(execution["execution_id"], "completed", {
+        "snapshot_manifest": snapshot,
+        "effective_parameters": {
+            **parameters["effective_parameters"],
+            "n_folds": result["n_folds"],
+        },
+        "metrics": {
+            "mean_accuracy": result["mean_accuracy"],
+            "mean_brier": result["mean_brier"],
+            "n_folds": result["n_folds"],
+            "total_matches": result["total_matches"],
+        },
+        "results": result,
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -434,16 +518,13 @@ class BacktestLoop:
                 "league_history_count": len(self.state.get("league_history", [])),
             }
 
-    def _execute_cycle(self, league_ids: list[int] | None = None,
-                       progress_cb=None) -> dict:
+    def _execute_cycle(self, league_ids: list[int] | None = None, progress_cb=None,
+                       source_job_id: int | None = None) -> dict:
         """Executa um ciclo completo de backtest (síncrono).
 
         ``progress_cb(idx, total, league_id)`` is invoked per league so callers
         (the job worker) can report progress and detect cancellation.
         """
-        cycle_start = datetime.now(timezone.utc).isoformat()
-        results = []
-
         # 1. Pega ligas com dados suficientes
         if league_ids is None:
             rows = db.run_query(
@@ -455,44 +536,80 @@ class BacktestLoop:
         else:
             eligible = [{"id": lid, "name": f"Liga {lid}", "played": 0} for lid in league_ids]
 
-        total = len(eligible)
-
-        for idx, lg in enumerate(eligible):
-            lid = lg["id"]
-            with self._lock:
-                self.state["current_league"] = lg["name"]
-                self.state["current_phase"] = f"backtest ({idx+1}/{total})"
-            if progress_cb is not None:
-                progress_cb(idx, total, lid)
-
-            try:
-                result = self._backtest_league_meta(lid)
-                results.append(result)
-            except Exception as e:
-                results.append({
-                    "league_id": lid,
-                    "league_name": lg["name"],
-                    "error": str(e)[:200],
-                })
-
-        # 2. Persiste resultados
-        cycle_result = {
-            "timestamp": cycle_start,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "leagues_processed": len(results),
-            "results": results,
-            "meta_suggestions": len(self.meta.history),
+        _manifest, snapshot = _snapshot_metadata(None)
+        effective_parameters = {}
+        for league in eligible:
+            model = get_model(league["id"])
+            effective_parameters[str(league["id"])] = {
+                "home_advantage": model["home_advantage"],
+                "window": model["window"],
+                "feature": model["feature"],
+                "rho": model.get("rho", 0.0),
+            }
+        parameters = {
+            "scope": "cycle",
+            "league_ids": [league["id"] for league in eligible],
+            "effective_parameters": effective_parameters,
         }
-        self._append_history(cycle_result)
+        if source_job_id is not None:
+            parameters["source_job_id"] = source_job_id
+        execution = execution_store.start(
+            execution_type="backtest", snapshot_hash=snapshot["hash"], parameters=parameters)
 
-        with self._lock:
-            self.state["cycle_count"] += 1
-            self.state["last_cycle_at"] = cycle_start
-            self.state["cycle_results"] = results
-            self.state["current_phase"] = "concluído"
-            self.state["current_league"] = ""
-        self._save_state()
+        cycle_start = datetime.now(timezone.utc).isoformat()
+        results = []
+        total = len(eligible)
+        try:
+            for idx, lg in enumerate(eligible):
+                lid = lg["id"]
+                with self._lock:
+                    self.state["current_league"] = lg["name"]
+                    self.state["current_phase"] = f"backtest ({idx+1}/{total})"
+                if progress_cb is not None:
+                    progress_cb(idx, total, lid)
 
+                try:
+                    result = self._backtest_league_meta(lid)
+                    results.append(result)
+                except Exception as error:
+                    results.append({
+                        "league_id": lid,
+                        "league_name": lg["name"],
+                        "error": str(error)[:200],
+                    })
+
+            # 2. Persiste resultados
+            cycle_result = {
+                "timestamp": cycle_start,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "leagues_processed": len(results),
+                "results": results,
+                "meta_suggestions": len(self.meta.history),
+            }
+            self._append_history(cycle_result)
+
+            with self._lock:
+                self.state["cycle_count"] += 1
+                self.state["last_cycle_at"] = cycle_start
+                self.state["cycle_results"] = results
+                self.state["current_phase"] = "concluído"
+                self.state["current_league"] = ""
+            self._save_state()
+        except Exception as error:
+            _finish_execution(execution["execution_id"], "failed", {
+                "snapshot_manifest": snapshot,
+                "error": str(error)[:2000],
+            })
+            raise
+
+        _finish_execution(execution["execution_id"], "completed", {
+            "snapshot_manifest": snapshot,
+            "metrics": {
+                "leagues_processed": cycle_result["leagues_processed"],
+                "leagues_failed": sum("error" in result for result in results),
+            },
+            "results": cycle_result,
+        })
         return cycle_result
 
     def _backtest_league_meta(self, league_id: int) -> dict:
@@ -626,8 +743,20 @@ class BacktestLoop:
         confidence_bins = {"high_correct": 0, "high_wrong": 0, "med_correct": 0, "med_wrong": 0, "low_correct": 0, "low_wrong": 0}
         proposals_count = {"1X2": 0, "GOLS": 0, "BTTS": 0, "PLACAR": 0}
         proposals_correct = {"1X2": 0, "GOLS": 0, "BTTS": 0, "PLACAR": 0}
+        batch_kickoff = None
+        pending_history: list[dict] = []
+
+        def apply_pending() -> None:
+            for pending in pending_history:
+                hist.setdefault(pending["home_id"], deque(maxlen=window)).appendleft(pending["home"])
+                hist.setdefault(pending["away_id"], deque(maxlen=window)).appendleft(pending["away"])
 
         for m in matches:
+            kickoff = m["kickoff_datetime"]
+            if batch_kickoff is not None and kickoff != batch_kickoff:
+                apply_pending()
+                pending_history.clear()
+            batch_kickoff = kickoff
             hid, aid = m["home_team_id"], m["away_team_id"]
             hh = hist.get(hid)
             ah = hist.get(aid)
@@ -714,18 +843,20 @@ class BacktestLoop:
                                 if exact in jogada:
                                     proposals_correct[prop_type] += 1
 
-            # Usar Feature Engine para stats da partida (unificado com prediction.py)
+            # Hold outcomes until the whole simultaneous kickoff was evaluated.
             gm = compute_match_stats({
                 "score_home": m["score_home"],
                 "score_away": m["score_away"],
                 "xg_home": m["xg_home"],
                 "xg_away": m["xg_away"],
             }, feature)
-            gh, ga = gm["gf"], gm["ga"]
-            hh = hist.setdefault(hid, deque(maxlen=window))
-            ah = hist.setdefault(aid, deque(maxlen=window))
-            hh.appendleft({"gf": gh, "ga": ga})
-            ah.appendleft({"gf": ga, "ga": gh})
+            pending_history.append({
+                "home_id": hid, "away_id": aid,
+                "home": {"gf": gm["gf"], "ga": gm["ga"]},
+                "away": {"gf": gm["ga"], "ga": gm["gf"]},
+            })
+
+        apply_pending()
 
         if total == 0:
             return {"accuracy": 0.0, "brier": 0.0, "logloss": 0.0,
