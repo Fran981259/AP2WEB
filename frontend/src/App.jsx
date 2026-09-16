@@ -1668,12 +1668,16 @@ function PredictionView({ p, token, onSave }) {
 
   function save() {
     if (!picked) { alert('Escolha uma jogada para salvar'); return }
+    if (!Number.isInteger(match.id) || match.id <= 0) {
+      alert('Só é possível salvar previsões de uma partida agendada da base de dados.')
+      return
+    }
     const odd = picked.prob > 0 ? (1 / picked.prob).toFixed(2) : '—'
     onSave({
-      league_id: match.league_id || null,
-      match_id: match.id || null,
-      home_team_id: match.home_id || null,
-      away_team_id: match.away_id || null,
+      league_id: match.league_id,
+      match_id: match.id,
+      home_team_id: match.home_id,
+      away_team_id: match.away_id,
       home_name: match.home,
       away_name: match.away,
       match_date: match.date || null,
