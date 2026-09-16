@@ -181,6 +181,10 @@ function Dashboard({ username, role, token, onLogout }) {
   const [tab, setTab] = useState('confronto')
   const [showMethodNotice, setShowMethodNotice] = useState(true)
   const canOperate = role === 'operator' || role === 'admin'
+  const roleLabel = role === 'admin' ? 'Administrador' : role === 'operator' ? 'Operador' : 'Leitor'
+  const operationHint = canOperate
+    ? ''
+    : 'Esta ação exige papel de operador ou administrador.'
   const [leagues, setLeagues] = useState([])
   const [selLeague, setSelLeague] = useState(null)
   const [matches, setMatches] = useState([])
@@ -489,6 +493,7 @@ function Dashboard({ username, role, token, onLogout }) {
         </nav>
         <div className="user">
           <span>{username}</span>
+          <span className={`role-badge role-${role}`}>{roleLabel}</span>
           <button type="button" className="btn-link" onClick={onLogout} aria-label="Sair da conta">Sair</button>
         </div>
       </header>
@@ -506,7 +511,11 @@ function Dashboard({ username, role, token, onLogout }) {
             <h3>Ligas no banco <span className="muted small">({leagues.length})</span></h3>
             <input className="search" placeholder="🔎 Buscar liga ou país..."
                    value={leagueSearch} onChange={e => setLeagueSearch(e.target.value)} />
-            {filteredLeagues.length === 0 && <p className="muted">Nenhuma liga. Sincronize uma liga na aba Sofascore.</p>}
+            {filteredLeagues.length === 0 && <p className="muted">
+              {canOperate
+                ? 'Nenhuma liga. Sincronize uma liga na aba Sofascore.'
+                : 'Nenhuma liga sincronizada. Peça a um operador para iniciar a sincronização.'}
+            </p>}
             {groupedByContinent.map(([continentName, list]) => {
               const open = openConts.has(continentName)
               return (
@@ -557,7 +566,8 @@ function Dashboard({ username, role, token, onLogout }) {
                     ))}
                   </select>
                 </label>
-                <button className="btn-small btn-demand" onClick={onCfDemand} disabled={!canOperate || loading || !cfLeague} title="Sincronizar esta liga no Sofascore">
+                <button className="btn-small btn-demand" onClick={onCfDemand} disabled={!canOperate || loading || !cfLeague}
+                        title={operationHint || 'Sincronizar esta liga no Sofascore'}>
                   {loading ? 'Sincronizando...' : '📥 Sincronizar dados'}
                 </button>
               </div>
@@ -686,7 +696,8 @@ function Dashboard({ username, role, token, onLogout }) {
                 <h3>🧠 Aprendizado do motor</h3>
                 <p className="muted small">Fator de mando (HA) e janela deslizante calibrados por liga via backtest honesto (prevê cada jogo usando só os jogos anteriores).</p>
               </div>
-              <button className="btn-primary" onClick={startCalibration} disabled={!canOperate || loading || ['pending', 'running'].includes(cal?.status)}>
+              <button className="btn-primary" onClick={startCalibration}
+                      disabled={!canOperate || loading || ['pending', 'running'].includes(cal?.status)} title={operationHint}>
                 {['pending', 'running'].includes(cal?.status) ? `Calibrando ${Math.round((cal.progress || 0) * 100)}%...` : '⚡ Recalibrar todas'}
               </button>
             </div>
@@ -867,12 +878,12 @@ function Dashboard({ username, role, token, onLogout }) {
                 </label>
                 {sofaLeague && (
                   <button className="btn-primary" onClick={() => startSofaSync(sofaLeague)}
-                          disabled={loading || ['pending', 'running'].includes(sofaStatus?.status)}>
+                          disabled={!canOperate || loading || ['pending', 'running'].includes(sofaStatus?.status)} title={operationHint}>
                     📥 Sync liga
                   </button>
                 )}
                 <button className="btn-primary" onClick={() => startSofaSync()}
-                        disabled={loading || ['pending', 'running'].includes(sofaStatus?.status)}>
+                        disabled={!canOperate || loading || ['pending', 'running'].includes(sofaStatus?.status)} title={operationHint}>
                   {['pending', 'running'].includes(sofaStatus?.status) ? `Sincronizando ${Math.round((sofaStatus.progress || 0) * 100)}%...` : '📥 Sincronizar tudo'}
                 </button>
               </div>
@@ -1138,15 +1149,15 @@ function Dashboard({ username, role, token, onLogout }) {
                          style={{ width: 60 }} />
                 </label>
                 {btStatus?.running ? (
-                  <button className="btn-small" onClick={stopBtLoop} disabled={!btStatus.running}>
+                  <button className="btn-small" onClick={stopBtLoop} disabled={!canOperate || !btStatus.running} title={operationHint}>
                     ⏹ Parar loop
                   </button>
                 ) : (
-                  <button className="btn-primary" onClick={startBtLoop} disabled={btRunning}>
+                  <button className="btn-primary" onClick={startBtLoop} disabled={!canOperate || btRunning} title={operationHint}>
                     {btRunning ? 'Rodando...' : '▶ Iniciar loop'}
                   </button>
                 )}
-                <button className="btn-primary" onClick={() => runBtCycle()} disabled={btRunning}>
+                <button className="btn-primary" onClick={() => runBtCycle()} disabled={!canOperate || btRunning} title={operationHint}>
                   {btRunning ? 'Rodando...' : '⚡ Rodar ciclo agora'}
                 </button>
               </div>
