@@ -61,6 +61,14 @@ class Settings:
             self.env = "production"
 
         self.secret: str | None = (env.get("AP2WEB_SECRET") or "").strip() or None
+        # Optional one-time bootstrap. It is consumed only when no active
+        # administrator exists, so replicas can safely share the same setting.
+        self.bootstrap_admin_username: str | None = (
+            env.get("AP2WEB_BOOTSTRAP_ADMIN_USERNAME") or ""
+        ).strip() or None
+        self.bootstrap_admin_password: str | None = (
+            env.get("AP2WEB_BOOTSTRAP_ADMIN_PASSWORD") or ""
+        ).strip() or None
         default_origins = (
             "http://localhost:5173,http://127.0.0.1:5173,https://app.theprostatereview.com"
             if self.env != "production"
@@ -186,6 +194,11 @@ class Settings:
 
     def validate(self) -> None:
         """Raise RuntimeError when configuration is unsafe for the environment."""
+        if bool(self.bootstrap_admin_username) != bool(self.bootstrap_admin_password):
+            raise RuntimeError(
+                "AP2WEB_BOOTSTRAP_ADMIN_USERNAME and "
+                "AP2WEB_BOOTSTRAP_ADMIN_PASSWORD must be set together."
+            )
         if self.env == "production":
             if self.secret is None:
                 raise RuntimeError("AP2WEB_SECRET is required in production.")

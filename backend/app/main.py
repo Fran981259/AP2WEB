@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from . import config, db, security, sofascore_data
 from .auth import (authenticate, create_user, current_user,
                    current_user_with_role, logout_session, refresh_session,
-                   require_permission)
+                   require_permission, bootstrap_admin)
 from .history import delete_prediction, list_predictions, save_prediction, stats
 from .learning import calibration_status, model_status, motor_curve
 from .prediction import predict_league_upcoming, predict_match, predict_fixture
@@ -65,6 +65,9 @@ async def _lifespan(app):
     worker_started = False
     try:
         db.init_db()
+        if bootstrap_admin(settings.bootstrap_admin_username,
+                           settings.bootstrap_admin_password):
+            logger.info("bootstrap administrator configured")
         try:
             security.prune_audit_log()
         except Exception:

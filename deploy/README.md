@@ -14,6 +14,11 @@ stack environment (never commit their values):
 - `AP2WEB_ORIGINS`: the exact public application origin, for example
   `https://app.example.com`.
 
+To create the first administrator without running database SQL, define both
+`AP2WEB_BOOTSTRAP_ADMIN_USERNAME` and `AP2WEB_BOOTSTRAP_ADMIN_PASSWORD` for
+the first deployment. The application uses them only when no active admin
+exists; remove both variables after the account is created.
+
 Production requires HTTPS and these values:
 
 ```text

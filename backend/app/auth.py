@@ -266,6 +266,49 @@ def create_user(username: str, password: str, role: str = "user") -> int:
         raise HTTPException(status_code=500, detail="Erro interno ao criar usuário")
 
 
+def bootstrap_admin(username: str | None, password: str | None) -> bool:
+    """Create or promote the explicitly configured first administrator.
+
+    This is intentionally a no-op unless both values are configured and the
+    database has no active administrator. It makes first deployment
+    reproducible without shipping a default credential or requiring direct SQL
+    access to the production database.
+    """
+    if not username and not password:
+        return False
+    if not username or not password:
+        raise RuntimeError("Bootstrap administrator credentials are incomplete.")
+
+    admins = db.run_query(
+        "SELECT 1 FROM users WHERE role='admin' AND is_active=1 LIMIT 1"
+    )
+    if admins:
+        return False
+
+    normalized = _normalize_username(username)
+    existing = _db_user_case_insensitive(normalized)
+    if existing is not None:
+        # The operator explicitly named this account and there is no other
+        # active admin. Promoting it is preferable to creating a second user.
+        db.run_exec("UPDATE users SET role='admin', is_active=1 WHERE id=?", (existing["id"],))
+        return True
+
+    try:
+        create_user(normalized, password, role="admin")
+        return True
+    except HTTPException as exc:
+        # Multiple API replicas may bootstrap at the same time. The unique
+        # username index elects one winner; the loser confirms the result.
+        if exc.status_code != 409:
+            raise
+        admins = db.run_query(
+            "SELECT 1 FROM users WHERE role='admin' AND is_active=1 LIMIT 1"
+        )
+        if admins:
+            return False
+        raise
+
+
 def authenticate(username: str, password: str, request: Request | None = None,
                  session_ttl: int | None = None) -> dict:
     """Login. Returns tokens + csrf. Generic 401 (no username oracle)."""
