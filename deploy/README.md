@@ -30,8 +30,11 @@ For a Tailnet-only HTTP smoke test, use `AP2WEB_ENV=development` and
 `AP2WEB_COOKIE_SECURE=false`. Do not leave that configuration in production.
 
 The `worker` service deliberately overrides the API image healthcheck. The API
-healthcheck calls `/api/ready`; that is invalid for the standalone worker and
-would cause Docker to terminate it.
+image checks its own liveness at `/api/health`; a standalone worker does not
+serve HTTP and therefore needs a durable worker-heartbeat check instead.
+
+`/api/ready` is intentionally stricter than the container healthcheck: it also
+requires the database schema and, in production, a live worker heartbeat.
 
 This compose file is isolated from production and runs API, worker, frontend,
 PostgreSQL and Redis together:
