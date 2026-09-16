@@ -1,0 +1,93 @@
+services:
+  app:
+    image: ghcr.io/fran981259/ap2web:latest
+    environment:
+      AP2WEB_ENV: ${AP2WEB_ENV:-production}
+      AP2WEB_SECRET: ${AP2WEB_SECRET}
+      AP2WEB_ORIGINS: ${AP2WEB_ORIGINS}
+      AP2WEB_ENFORCE_ROLES: "true"
+      AP2WEB_COOKIE_SECURE: ${AP2WEB_COOKIE_SECURE:-true}
+      AP2WEB_ENABLE_WORKER: "false"
+      AP2WEB_REQUIRE_WORKER: "true"
+      AP2WEB_RATE_LIMIT_STORAGE: redis
+      AP2WEB_REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://ap2web:${POSTGRES_PASSWORD}@postgres:5432/ap2web
+    ports:
+      - target: 8000
+        published: 8000
+        protocol: tcp
+        mode: ingress
+    networks:
+      - ap2web
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      update_config:
+        order: start-first
+        failure_action: rollback
+
+  worker:
+    image: ghcr.io/fran981259/ap2web:latest
+    command: ["python", "-m", "backend.app.worker"]
+    environment:
+      AP2WEB_ENV: ${AP2WEB_ENV:-production}
+      AP2WEB_SECRET: ${AP2WEB_SECRET}
+      AP2WEB_ORIGINS: ${AP2WEB_ORIGINS}
+      AP2WEB_ENFORCE_ROLES: "true"
+      AP2WEB_COOKIE_SECURE: ${AP2WEB_COOKIE_SECURE:-true}
+      AP2WEB_REQUIRE_WORKER: "true"
+      AP2WEB_RATE_LIMIT_STORAGE: redis
+      AP2WEB_REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://ap2web:${POSTGRES_PASSWORD}@postgres:5432/ap2web
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'python -c "from backend.app.jobs import worker_healthy; raise SystemExit(0 if worker_healthy(30) else 1)"'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - ap2web
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ap2web
+      POSTGRES_USER: ap2web
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ap2web
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - ap2web
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  ap2web:
+    driver: overlay
