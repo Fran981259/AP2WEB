@@ -16,7 +16,10 @@ LEAGUES_FILE = Path(os.environ.get(
     Path(__file__).resolve().parent / "sofascore_leagues.json"))
 
 # Sofascore unique-tournament IDs (URLs informadas pelo usuário)
-LEAGUES = [
+# Catálogo histórico. Não é a lista operacional padrão: sincronizar dezenas
+# de campeonatos com cobertura desigual transforma o produto em um coletor de
+# dados, não em uma plataforma de previsão confiável.
+CATALOG_LEAGUES = [
     # ---- Brasil ----
     {"id": 325, "name": "Brasil - Série A", "country": "Brazil"},
     {"id": 390, "name": "Brasil - Série B", "country": "Brazil"},
@@ -147,9 +150,21 @@ LEAGUES = [
     {"id": 197, "name": "Latvia - Virslīga", "country": "Latvia"},
 ]
 
+# Escopo inicial deliberadamente pequeno. São competições com calendário,
+# volume e cobertura de estatísticas mais consistentes. O catálogo continua
+# acima para uma expansão posterior, que só deve ocorrer após passar pelos
+# mesmos gates de qualidade e backtest.
+LEAGUES = [
+    {"id": 325, "name": "Brasil - Série A", "country": "Brazil"},
+    {"id": 17, "name": "Inglaterra - Premier League", "country": "England"},
+    {"id": 8, "name": "Espanha - LaLiga", "country": "Spain"},
+    {"id": 35, "name": "Alemanha - Bundesliga", "country": "Germany"},
+    {"id": 23, "name": "Itália - Serie A", "country": "Italy"},
+]
+
 
 def load_leagues() -> list[dict]:
-    """Lê ligas do arquivo JSON se existir, senão usa a lista embutida."""
+    """Lê a lista operacional do JSON ou o núcleo de cinco ligas."""
     if LEAGUES_FILE.exists():
         try:
             return json.loads(LEAGUES_FILE.read_text(encoding="utf-8"))

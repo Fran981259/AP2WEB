@@ -186,6 +186,7 @@ function Dashboard({ username, role, token, onLogout }) {
     ? ''
     : 'Esta ação exige papel de operador ou administrador.'
   const [leagues, setLeagues] = useState([])
+  const [dataQuality, setDataQuality] = useState(null)
   const [selLeague, setSelLeague] = useState(null)
   const [matches, setMatches] = useState([])
   const [prediction, setPrediction] = useState(null)
@@ -246,6 +247,10 @@ function Dashboard({ username, role, token, onLogout }) {
     try { setLearn(await api.learningStatus(token)) } catch (e) { setError(e.message) }
   }, [token])
 
+  const loadDataQuality = useCallback(async () => {
+    try { setDataQuality(await api.dataQuality(token)) } catch (e) { setError(e.message) }
+  }, [token])
+
   const loadSofa = useCallback(async (leagueId) => {
     try { setSofa(await api.sofascoreData(leagueId, token)) } catch (e) { setError(e.message) }
   }, [token])
@@ -254,8 +259,9 @@ function Dashboard({ username, role, token, onLogout }) {
     refreshLeagues().catch(e => setError(e.message))
     if (tab === 'historico') loadHistory()
     if (tab === 'aprendizado') loadLearning()
+    if (tab === 'dados') loadDataQuality()
     if (tab === 'sofascore') loadSofa()
-  }, [tab, refreshLeagues, loadHistory, loadLearning, loadSofa])
+  }, [tab, refreshLeagues, loadHistory, loadLearning, loadDataQuality, loadSofa])
 
   usePolling(opts => api.job(sofaStatus?.id, token, opts), {
     enabled: Boolean(sofaStatus?.id && ['pending', 'running'].includes(sofaStatus.status)),
@@ -813,7 +819,7 @@ function Dashboard({ username, role, token, onLogout }) {
                 <h3>🗄️ Dados no banco</h3>
                 <p className="muted small">Ligas sincronizadas do Sofascore: jogos jogados/agendados, temporada ativa, último sync e estado do modelo calibrado.</p>
               </div>
-              <button className="btn-small" onClick={() => { refreshLeagues(); loadLearning() }}>🔄 Atualizar</button>
+              <button className="btn-small" onClick={() => { refreshLeagues(); loadLearning(); loadDataQuality() }}>🔄 Atualizar</button>
             </div>
             <div className="table-scroll">
               <table className="runs">
@@ -846,6 +852,30 @@ function Dashboard({ username, role, token, onLogout }) {
                   )}
                 </tbody>
               </table>
+            </div>
+            <div className="panel" style={{ marginTop: 16 }}>
+              <div className="panel-head">
+                <div>
+                  <h3>🧪 Qualidade dos dados</h3>
+                  <p className="muted small">Gate operacional: resultados completos, cobertura de xG, histórico mínimo e sync recente. “Apta” não é promessa de acerto.</p>
+                </div>
+                <span className="muted small">{dataQuality ? `${dataQuality.summary.ready}/${dataQuality.summary.total} aptas` : 'Carregando...'}</span>
+              </div>
+              <div className="table-scroll">
+                <table className="runs">
+                  <thead><tr><th>Liga</th><th>Estado</th><th>Jogos</th><th>Resultados</th><th>xG</th><th>Último sync</th><th>Diagnóstico</th></tr></thead>
+                  <tbody>
+                    {(dataQuality?.items || []).map(item => (
+                      <tr key={item.league_id}>
+                        <td><b>{item.name}</b></td><td>{item.status === 'ready' ? '✓ Apta' : item.status}</td>
+                        <td>{item.played}</td><td>{(item.results_coverage * 100).toFixed(0)}%</td>
+                        <td>{(item.xg_coverage * 100).toFixed(0)}%</td><td>{item.last_sync || '—'}</td><td className="muted small">{item.reason}</td>
+                      </tr>
+                    ))}
+                    {dataQuality && dataQuality.items.length === 0 && <tr><td colSpan={7} className="muted">Nenhuma liga disponível.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </section>
         </main>

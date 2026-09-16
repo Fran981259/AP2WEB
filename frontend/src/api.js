@@ -145,6 +145,7 @@ export const api = {
     return this.request('/me', { ...opts })
   },
   leagues(token, opts = {}) { return this.request('/leagues', { token, ...opts }) },
+  dataQuality(token, opts = {}) { return this.request('/data/quality', { token, ...opts }) },
   job(jobId, token, opts = {}) { return this.request(`/jobs/${jobId}`, { token, ...opts }) },
   cancelJob(jobId, token, opts = {}) { return this.request(`/jobs/${jobId}/cancel`, { method: 'POST', body: {}, token, ...opts }) },
   leagueMatches(id, token, opts = {}) { return this.request(`/leagues/${id}/matches`, { token, ...opts }) },

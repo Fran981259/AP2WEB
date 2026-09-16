@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import config, db, security, sofascore_data
+from . import config, data_quality, db, security, sofascore_data
 from .auth import (authenticate, create_user, current_user,
                    current_user_with_role, logout_session, refresh_session,
                    require_permission, bootstrap_admin)
@@ -609,6 +609,21 @@ def sofascore_data_endpoint(league_id: int | None = None, next_round: int = 1,
 @app.get("/api/leagues", tags=["data"])
 def leagues(user: str = Depends(current_user)):
     return sofascore_data.leagues()
+
+
+@app.get("/api/data/quality", tags=["data"])
+def data_quality_report(user: dict = Depends(current_user_with_role)):
+    """Quality gates by league; read-only and safe for every authenticated user."""
+    items = data_quality.league_quality()
+    return {
+        "items": items,
+        "summary": {
+            "ready": sum(item["status"] == "ready" for item in items),
+            "total": len(items),
+            "statuses": {status: sum(item["status"] == status for item in items)
+                         for status in ("ready", "no_data", "stale", "incomplete", "insufficient_history")},
+        },
+    }
 
 
 @app.get("/api/leagues/{league_id}/teams", tags=["data"])
