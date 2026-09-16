@@ -308,10 +308,15 @@ def model_status() -> dict:
 def motor_curve(buckets: int = 20) -> dict:
     """Linha de aprendizado real do motor: acurácia acumulada média por liga,
     alinhada por % de temporada (0→100%) e ponderada pelo nº de amostras."""
+    # PostgreSQL does not allow a SELECT alias (``played``) in the same
+    # statement's WHERE clause.  SQLite happened to accept the old query,
+    # masking the defect until the production PostgreSQL deployment.
     leagues = db.run_query(
+        "SELECT id, name, played FROM ("
         "SELECT l.id, l.name, "
         f" {_PLAYED_COUNT.format(alias='l')} AS played "
-        "FROM leagues l WHERE played >= ? ORDER BY l.name", (MIN_SAMPLES,))
+        "FROM leagues l"
+        ") eligible WHERE played >= ? ORDER BY name", (MIN_SAMPLES,))
     if not leagues:
         return {"series": [], "leagues": [], "total_played": 0}
 
