@@ -5,7 +5,7 @@ import pytest
 
 from backend.app import db
 from backend.app.history import resolve_predictions, save_prediction
-from backend.app.sofascore_data import _upsert_match
+from backend.app.sofascore import _upsert_match
 
 
 def _future_match():
@@ -114,7 +114,7 @@ def test_completed_upsert_resolves_its_pending_predictions_once(monkeypatch):
         "awayScore": {"current": 0},
         "status": {"code": 100},
     }
-    monkeypatch.setattr("backend.app.sofascore_data._fetch", lambda *_: {})
+    monkeypatch.setattr("backend.app.sofascore.upserts._fetch", lambda *_: {})
 
     _upsert_match(league_id, event | {"status": {"code": 0}})
     pending = db.run_query("SELECT status FROM predictions WHERE id=?", (prediction_id,))[0]

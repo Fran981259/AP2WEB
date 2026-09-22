@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 
 from . import db
+from .columns import PREDICTIONS
 
 
 def _brier_score(prob_correct: float) -> float:
@@ -188,14 +189,14 @@ def save_prediction(user_id, data: dict) -> dict:
           canonical.get("training_window"), canonical.get("training_sample_size"),
           canonical.get("league_model_version"), predicted_at,
           canonical.get("source_data_freshness"), canonical.get("confidence_level"), canonical.get("fallback_reason")))
-    row = db.run_query("SELECT * FROM predictions WHERE id=?", (pid,))[0]
+    row = db.run_query(f"SELECT {PREDICTIONS} FROM predictions WHERE id=?", (pid,))[0]
     return dict(row)
 
 
 def list_predictions(user_id, limit: int = 200) -> list[dict]:
     resolve_predictions(user_id)
     rows = db.run_query(
-        "SELECT * FROM predictions WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        f"SELECT {PREDICTIONS} FROM predictions WHERE user_id=? ORDER BY id DESC LIMIT ?",
         (user_id, limit))
     out = []
     for r in rows:
@@ -251,7 +252,7 @@ def resolve_predictions(user_id) -> int:
     """Resolve previsões pending cuja partida já tem resultado. Retorna nº resolvidas."""
     n = 0
     for p in db.run_query(
-            "SELECT * FROM predictions WHERE user_id=? AND status='pending'", (user_id,)):
+            f"SELECT {PREDICTIONS} FROM predictions WHERE user_id=? AND status='pending'", (user_id,)):
         score = _resolve_match_id(p["match_id"]) if p["match_id"] is not None else _resolve_fixture(p)
         if score is None:
             continue
@@ -261,7 +262,8 @@ def resolve_predictions(user_id) -> int:
         if res_dict is None:
             continue
         db.run_exec(
-            "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, log_loss=? WHERE id=?",
+            "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, "
+            "log_loss=?, updated_at=datetime('now') WHERE id=?",
             ("correct" if res_dict["result"] else "wrong", res_dict["brier"], res_dict["log_loss"], p["id"]))
         n += 1
     return n
@@ -274,7 +276,7 @@ def resolve_predictions_for_match(match_id: int) -> int:
         return 0
     n = 0
     for p in db.run_query(
-            "SELECT * FROM predictions WHERE match_id=? AND status='pending'", (match_id,)):
+            f"SELECT {PREDICTIONS} FROM predictions WHERE match_id=? AND status='pending'", (match_id,)):
         prob_home = dict(p).get("prob", 0.5)
         res_dict = _result_of_pick_v2(
             p["pick_type"], p["pick_value"], score[0], score[1], prob_home)
@@ -282,7 +284,8 @@ def resolve_predictions_for_match(match_id: int) -> int:
             continue
         # The pending condition makes concurrent/repeated syncs idempotent.
         updated = db.run_exec(
-            "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, log_loss=? "
+            "UPDATE predictions SET status=?, resolved_at=datetime('now'), brier_score=?, log_loss=?, "
+            "updated_at=datetime('now') "
             "WHERE id=? AND status='pending'",
             ("correct" if res_dict["result"] else "wrong", res_dict["brier"],
              res_dict["log_loss"], p["id"]))

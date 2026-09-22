@@ -2,7 +2,7 @@ from backend.app import db, execution_store
 
 
 def test_execution_events_are_append_only_and_latest_state_is_derived(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "executions.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "executions.db")
     db.init_db()
 
     started = execution_store.start(
@@ -28,7 +28,7 @@ def test_execution_events_are_append_only_and_latest_state_is_derived(tmp_path, 
 
 
 def test_execution_store_requires_a_single_started_then_terminal_lifecycle(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "executions.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "executions.db")
     db.init_db()
 
     try:

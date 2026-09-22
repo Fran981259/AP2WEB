@@ -16,7 +16,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.app.reproducibility_artifact import build_artifact, write_artifact  # noqa: E402
-from backend.app.scientific_protocol import run_scientific_protocol  # noqa: E402
+from backend.app.scientific import run_scientific_protocol  # noqa: E402
 from backend.app import execution_store  # noqa: E402
 
 

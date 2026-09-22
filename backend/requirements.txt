@@ -1,7 +1,7 @@
 beautifulsoup4==4.15.0
 fastapi==0.141.1
-starlette==0.47.3
-anyio==4.8.0
+starlette==1.6.0
+anyio==4.15.1
 h2==4.4.1
 httpx==0.28.1
 lxml==6.1.1

@@ -12,7 +12,7 @@
     "lint": "backend/.venv/bin/ruff check backend/app",
     "lint:frontend": "npm --prefix frontend run lint",
     "format": "backend/.venv/bin/ruff format backend/app",
-    "typecheck": "backend/.venv/bin/mypy --follow-imports=skip backend/app/main.py backend/app/security.py backend/app/config.py backend/app/db.py backend/app/auth.py backend/app/jobs.py backend/app/ratelimit.py backend/app/worker.py",
+    "typecheck": "backend/.venv/bin/mypy --follow-imports=skip backend/app/main.py backend/app/api/*.py backend/app/security backend/app/config.py backend/app/db backend/app/auth backend/app/jobs backend/app/ratelimit.py backend/app/worker.py",
     "compile": "backend/.venv/bin/python -m compileall backend/app",
     "test:unit": "backend/.venv/bin/python -m pytest tests/ -q",
     "test:integration": "backend/.venv/bin/python tests/regression_suite.py --phase A",

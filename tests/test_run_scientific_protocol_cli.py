@@ -9,7 +9,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "backend/scripts/run_scientific_p
 
 
 def test_cli_persists_execution_only_after_artifact_write(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cli.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "cli.db")
     db.init_db()
     output = tmp_path / "artifact.json"
     calls = []
@@ -25,7 +25,7 @@ def test_cli_persists_execution_only_after_artifact_write(tmp_path, monkeypatch)
         calls.append((path, value, force))
         path.write_text("artifact\n")
 
-    monkeypatch.setattr("backend.app.scientific_protocol.run_scientific_protocol", protocol)
+    monkeypatch.setattr("backend.app.scientific.run_scientific_protocol", protocol)
     monkeypatch.setattr("backend.app.reproducibility_artifact.build_artifact", artifact)
     monkeypatch.setattr("backend.app.reproducibility_artifact.write_artifact", write)
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--league-id", "7", "--fixed-parameters", '{"window":5}',

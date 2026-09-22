@@ -1,7 +1,7 @@
 from backend.app import db, learning
 import pytest
 
-from backend.app.scientific_protocol import (
+from backend.app.scientific import (
     build_snapshot_manifest,
     run_scientific_protocol,
     scientific_metrics,
@@ -18,7 +18,7 @@ def _insert_match(league_id, home, away, date, score_home=1, score_away=0):
 
 
 def test_snapshot_hash_is_deterministic_and_league_scoped(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "protocol.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "protocol.db")
     db.init_db()
     league_id = db.run_query("SELECT id FROM leagues ORDER BY id LIMIT 1")[0]["id"]
     home = db.run_exec("INSERT INTO teams(league_id,name) VALUES(?,?)", (league_id, "Home"))
@@ -45,7 +45,7 @@ def test_temporal_split_reserves_newest_rows_and_validates_fraction():
 
 
 def test_protocol_blocks_empty_data_and_runs_supplied_backtest(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "protocol.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "protocol.db")
     db.init_db()
     assert run_scientific_protocol()["status"] == "blocked"
 
@@ -62,7 +62,7 @@ def test_protocol_blocks_empty_data_and_runs_supplied_backtest(tmp_path, monkeyp
 
 
 def test_protocol_uses_development_only_for_selection_and_holdout_for_final_evaluation(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "protocol.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "protocol.db")
     db.init_db()
     league_id = db.run_query("SELECT id FROM leagues ORDER BY id LIMIT 1")[0]["id"]
     home = db.run_exec("INSERT INTO teams(league_id,name) VALUES(?,?)", (league_id, "Home"))
@@ -143,7 +143,7 @@ def test_temporal_split_keeps_same_kickoff_rows_together():
 
 
 def test_protocol_baselines_exclude_holdout_outcomes_and_report_comparison(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "protocol.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "protocol.db")
     db.init_db()
     league_id = db.run_query("SELECT id FROM leagues ORDER BY id LIMIT 1")[0]["id"]
     home = db.run_exec("INSERT INTO teams(league_id,name) VALUES(?,?)", (league_id, "Home"))

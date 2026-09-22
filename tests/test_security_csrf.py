@@ -34,6 +34,15 @@ def test_csrf_blocks_wrong_token(admin_client):
     assert r.json()["error"]["code"] == "CSRF_FAILED"
 
 
+def test_csrf_blocks_market_quote_without_header(admin_client):
+    r = admin_client.post(
+        "/api/market/1/quotes",
+        json={"provider": "test", "captured_at": "2026-01-01T00:00:00Z", "odds": [2.0, 3.0, 4.0]},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "CSRF_FAILED"
+
+
 def test_csrf_allows_valid_header(admin_client):
     csrf = admin_client.cookies.get(config.CSRF_COOKIE)
     assert csrf

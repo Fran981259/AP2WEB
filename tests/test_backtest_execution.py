@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from backend.app import backtest_engine, db, execution_store
+from backend.app import backtest as backtest_engine
+from backend.app import db, execution_store
+from backend.app.backtest import cycle as _cycle
+from backend.app.backtest import executions as _executions
+from backend.app.backtest import paths as _paths
+from backend.app.backtest import temporal as _temporal
 
 
 def _manifest(league_id):
@@ -16,9 +21,9 @@ def _manifest(league_id):
 
 
 def test_single_league_backtest_persists_one_completed_execution(monkeypatch):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
     expected = {"accuracy": 50.0, "brier": 0.4, "total": 3}
-    monkeypatch.setattr(backtest_engine, "backtest_league", lambda league_id: expected)
+    monkeypatch.setattr(_executions, "backtest_league", lambda league_id: expected)
 
     assert backtest_engine.run_single_league_backtest(7) == expected
 
@@ -34,12 +39,12 @@ def test_single_league_backtest_persists_one_completed_execution(monkeypatch):
 
 
 def test_single_league_backtest_failure_gets_terminal_execution(monkeypatch):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
 
     def fail(league_id):
         raise RuntimeError("walk-forward failed")
 
-    monkeypatch.setattr(backtest_engine, "backtest_league", fail)
+    monkeypatch.setattr(_executions, "backtest_league", fail)
 
     with pytest.raises(RuntimeError, match="walk-forward failed"):
         backtest_engine.run_single_league_backtest(8)
@@ -50,12 +55,12 @@ def test_single_league_backtest_failure_gets_terminal_execution(monkeypatch):
 
 
 def test_temporal_cv_persists_completed_execution(monkeypatch):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
     expected = {
         "folds": [], "mean_accuracy": 51.5, "mean_brier": 0.31,
         "std_accuracy": 1.0, "std_brier": 0.02, "total_matches": 30, "n_folds": 4,
     }
-    monkeypatch.setattr(backtest_engine, "temporal_cv", lambda league_id, n_folds: expected)
+    monkeypatch.setattr(_temporal, "temporal_cv", lambda league_id, n_folds: expected)
 
     assert backtest_engine.run_temporal_cv(9, 6) == expected
 
@@ -70,12 +75,12 @@ def test_temporal_cv_persists_completed_execution(monkeypatch):
 
 
 def test_temporal_cv_failure_gets_terminal_execution(monkeypatch):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
 
     def fail(league_id, n_folds):
         raise RuntimeError("cv failed")
 
-    monkeypatch.setattr(backtest_engine, "temporal_cv", fail)
+    monkeypatch.setattr(_temporal, "temporal_cv", fail)
 
     with pytest.raises(RuntimeError, match="cv failed"):
         backtest_engine.run_temporal_cv(10, 5)
@@ -86,10 +91,10 @@ def test_temporal_cv_failure_gets_terminal_execution(monkeypatch):
 
 
 def test_cycle_execution_records_source_job_and_single_lifecycle(monkeypatch, tmp_path):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
-    monkeypatch.setattr(backtest_engine, "_STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(backtest_engine, "_HISTORY_FILE", tmp_path / "history.jsonl")
-    monkeypatch.setattr(backtest_engine, "get_model", lambda league_id: {
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_paths, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(_paths, "_HISTORY_FILE", tmp_path / "history.jsonl")
+    monkeypatch.setattr(_cycle, "get_model", lambda league_id: {
         "home_advantage": 1.2, "window": 8, "feature": "goals", "rho": 0.1,
     })
     loop = backtest_engine.BacktestLoop()
@@ -110,10 +115,10 @@ def test_cycle_execution_records_source_job_and_single_lifecycle(monkeypatch, tm
 
 
 def test_cycle_failure_gets_terminal_failed_execution(monkeypatch, tmp_path):
-    monkeypatch.setattr(backtest_engine, "build_snapshot_manifest", _manifest)
-    monkeypatch.setattr(backtest_engine, "_STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(backtest_engine, "_HISTORY_FILE", tmp_path / "history.jsonl")
-    monkeypatch.setattr(backtest_engine, "get_model", lambda league_id: {
+    monkeypatch.setattr(_executions, "build_snapshot_manifest", _manifest)
+    monkeypatch.setattr(_paths, "_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(_paths, "_HISTORY_FILE", tmp_path / "history.jsonl")
+    monkeypatch.setattr(_cycle, "get_model", lambda league_id: {
         "home_advantage": 1.2, "window": 8, "feature": "goals", "rho": 0.1,
     })
     loop = backtest_engine.BacktestLoop()

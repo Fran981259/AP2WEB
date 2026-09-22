@@ -16,7 +16,6 @@ ignore = ["E501"]
 # lint gate; their internals are not touched by the Phase 3 hardening (avoids
 # behavior drift in the betting models). The gate still runs on them — these
 # specific style nits are explicitly waived with a reason.
-"backend/app/prediction.py" = ["E402", "F841", "E741"]
 "backend/app/feature_engine.py" = ["F841"]
 "backend/app/leagues_config.py" = ["E741"]
 "backend/app/bayesian.py" = ["F841", "E741"]

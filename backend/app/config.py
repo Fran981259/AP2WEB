@@ -7,6 +7,7 @@ when production configuration is weak.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 _DEV_PLACEHOLDER_SECRETS = {
     "dev-secret-change-me-please-use-env-var-0123456789abcdef",
@@ -52,6 +53,21 @@ def _parse_origins(value: str | None, default: str) -> list[str]:
     return [o.strip() for o in str(raw).split(",") if o.strip()]
 
 
+def read_env_value(env: Mapping[str, str], name: str) -> str:
+    """Read a setting directly or from a Docker-secret-compatible *_FILE path."""
+    value = (env.get(name) or "").strip()
+    file_path = (env.get(f"{name}_FILE") or "").strip()
+    if value:
+        return value
+    if not file_path:
+        return ""
+    try:
+        with open(file_path, encoding="utf-8") as secret_file:
+            return secret_file.read().strip()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read {name}_FILE.") from exc
+
+
 class Settings:
     def __init__(self, environ: dict | None = None):
         env = environ if environ is not None else os.environ
@@ -60,7 +76,8 @@ class Settings:
         if self.env not in ("development", "production", "test"):
             self.env = "production"
 
-        self.secret: str | None = (env.get("AP2WEB_SECRET") or "").strip() or None
+        self.secret: str | None = read_env_value(env, "AP2WEB_SECRET") or None
+        self.database_url: str | None = read_env_value(env, "DATABASE_URL") or None
         # Optional one-time bootstrap. It is consumed only when no active
         # administrator exists, so replicas can safely share the same setting.
         self.bootstrap_admin_username: str | None = (
@@ -230,6 +247,8 @@ class Settings:
                 raise RuntimeError("AP2WEB_REDIS_URL is required when AP2WEB_RATE_LIMIT_STORAGE=redis.")
             if not self.require_worker:
                 raise RuntimeError("AP2WEB_REQUIRE_WORKER=false is forbidden in production.")
+            if not self.database_url or not self.database_url.startswith(("postgresql://", "postgres://")):
+                raise RuntimeError("DATABASE_URL (or DATABASE_URL_FILE) must use PostgreSQL in production.")
         else:
             if self.origins and "*" in self.origins:
                 raise RuntimeError("Wildcard CORS origin is never allowed (credentials are enabled).")

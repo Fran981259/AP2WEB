@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.sofascore_data import _client  # noqa: E402
+from app.sofascore import _client  # noqa: E402
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "app", "data")

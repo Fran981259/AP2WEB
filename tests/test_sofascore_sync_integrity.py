@@ -5,7 +5,9 @@ import json
 from datetime import datetime, timezone
 
 from backend.app import db, jobs
-from backend.app import sofascore_data as sofa
+from backend.app import sofascore as sofa
+from backend.app.sofascore import sync as _sync
+from backend.app.sofascore import upserts as _upserts
 from backend.app.prediction import predict_fixture
 
 
@@ -39,13 +41,13 @@ def test_partial_sync_reports_failed_round_and_does_not_advance_freshness(monkey
     league_id = db.run_exec("INSERT INTO leagues(sofascore_id,name,last_sync) VALUES(?,?,?)",
                             (cfg["id"], cfg["name"], "2000-01-01"))
     event = _event(1)
-    monkeypatch.setattr(sofa, "_latest_season", lambda _, heartbeat=None: (1, "2026"))
-    monkeypatch.setattr(sofa, "_older_seasons", lambda *_: [])
-    monkeypatch.setattr(sofa, "_season_rounds", lambda *_, heartbeat=None: ([1, 2], False))
-    monkeypatch.setattr(sofa, "_fetch_round_events",
+    monkeypatch.setattr(_sync, "_latest_season", lambda _, heartbeat=None: (1, "2026"))
+    monkeypatch.setattr(_sync, "_older_seasons", lambda *_: [])
+    monkeypatch.setattr(_sync, "_season_rounds", lambda *_, heartbeat=None: ([1, 2], False))
+    monkeypatch.setattr(_sync, "_fetch_round_events",
                         lambda *args, heartbeat=None: ([event], False) if args[-1] == 1 else ([], True))
-    monkeypatch.setattr(sofa, "_fetch_all_events", lambda *_, heartbeat=None: ([], [3]))
-    monkeypatch.setattr(sofa, "_upsert_match", lambda *_: True)
+    monkeypatch.setattr(_sync, "_fetch_all_events", lambda *_, heartbeat=None: ([], [3]))
+    monkeypatch.setattr(_sync, "_upsert_match", lambda *_: True)
 
     result = sofa.sync_league(cfg)
 
@@ -65,7 +67,7 @@ def test_sync_job_fails_and_retains_partial_result(monkeypatch):
     job = jobs.create_job("sync_league", requested_by=user_id, league_id=league_id,
                           parameters={"integrity": True})
     outcome = {"ok": False, "partial": True, "failed_pages": [{"page": 3}]}
-    monkeypatch.setattr("backend.app.sofascore_data.sync_league_local", lambda _, heartbeat=None: outcome)
+    monkeypatch.setattr("backend.app.sofascore.sync_league_local", lambda _, heartbeat=None: outcome)
 
     jobs._run_one(job)
 
@@ -83,8 +85,8 @@ def test_played_match_retries_missing_stats_on_later_sync(monkeypatch):
         (league_id, event["id"], home_id, away_id, "played", 2, 1),
     )
     calls = []
-    monkeypatch.setattr(sofa, "_fetch", lambda *args: calls.append(args[0]) or {})
-    monkeypatch.setattr(sofa, "_extract_stats", lambda _: {"xg": {"home": 1.4, "away": 0.6}})
+    monkeypatch.setattr(_upserts, "_fetch", lambda *args: calls.append(args[0]) or {})
+    monkeypatch.setattr(_upserts, "_extract_stats", lambda _: {"xg": {"home": 1.4, "away": 0.6}})
 
     sofa._upsert_match(league_id, event)
 
@@ -120,7 +122,7 @@ def test_kickoff_correction_updates_match_date_and_keeps_round(monkeypatch):
          "scheduled"),
     )
     event.pop("roundInfo")
-    monkeypatch.setattr(sofa, "_fetch", lambda *_: {})
+    monkeypatch.setattr(_upserts, "_fetch", lambda *_: {})
 
     sofa._upsert_match(league_id, event)
 
@@ -133,7 +135,7 @@ def test_kickoff_correction_updates_match_date_and_keeps_round(monkeypatch):
 def test_historical_ingestion_uses_ingestion_time_for_prediction_freshness(monkeypatch):
     league_id, home_id, away_id = _league_and_teams(6)
     historical = _event(6, timestamp=946_684_800)  # 2000-01-01 UTC
-    monkeypatch.setattr(sofa, "_fetch", lambda *_: {})
+    monkeypatch.setattr(_upserts, "_fetch", lambda *_: {})
 
     sofa._upsert_match(league_id, historical)
 

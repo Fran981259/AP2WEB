@@ -10,7 +10,7 @@ from backend.app.model import build_gamma_poisson_matrix, build_matrix, dixon_co
 
 @pytest.fixture
 def match_history(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "scientific.db")
+    monkeypatch.setattr(db.env, "DB_PATH", tmp_path / "scientific.db")
     db.init_db()
     lid = db.run_query("SELECT id FROM leagues ORDER BY id LIMIT 1")[0]["id"]
     home = db.run_exec("INSERT INTO teams(league_id,name) VALUES(?,?)", (lid, "Home"))
@@ -77,7 +77,7 @@ def test_prediction_features_follow_team_perspective(match_history, feature, exp
 
 def test_bayesian_override_with_context_is_deterministic(match_history, monkeypatch):
     lid, home, away, _ = match_history
-    monkeypatch.setattr(prediction, "_model_for", lambda _: {
+    monkeypatch.setattr(prediction.builder, "_model_for", lambda _: {
         "feature": "goals", "window": 10, "home_advantage": 1.15,
         "rho": 0, "method": "hybrid", "ctx_form": 1})
     one = prediction.predict_fixture(lid, home, away, use_bayesian=False)
@@ -87,7 +87,7 @@ def test_bayesian_override_with_context_is_deterministic(match_history, monkeypa
 
 def test_bayesian_uses_the_model_feature(match_history, monkeypatch):
     lid, home, away, _ = match_history
-    monkeypatch.setattr(prediction, "_model_for", lambda _: {
+    monkeypatch.setattr(prediction.builder, "_model_for", lambda _: {
         "feature": "xg", "window": 10, "home_advantage": 1.15,
         "rho": 0, "method": "bayesian", "ctx_form": 0})
     result = prediction.predict_fixture(lid, home, away)
@@ -116,7 +116,7 @@ def test_match_prediction_uses_kickoff_as_default_cutoff(match_history, monkeypa
         captured["cutoff"] = args[-2]
         return {"ok": True}
 
-    monkeypatch.setattr(prediction, "_build", fake_build)
+    monkeypatch.setattr(prediction.service, "_build", fake_build)
     assert prediction.predict_match(match_id) == {"ok": True}
     assert captured["cutoff"] == "2020-01-01T12:00:00+00:00"
     with pytest.raises(ValueError, match="cannot be after"):
@@ -135,8 +135,8 @@ def test_backtest_does_not_leak_between_same_kickoff_fixtures(match_history, mon
         observed.append((home_stats["gf_avg"], away_stats["gf_avg"]))
         return {"1": 0.4, "X": 0.2, "2": 0.4}
 
-    monkeypatch.setattr(learning, "MIN_SAMPLES", 1)
-    monkeypatch.setattr(learning, "_predict_probs", fake_probs)
+    monkeypatch.setattr(learning.walkforward, "MIN_SAMPLES", 1)
+    monkeypatch.setattr(learning.walkforward, "_predict_probs", fake_probs)
     result = learning.backtest_league(lid, feature="goals")
     assert result["total"] == 2
     assert observed == [(3.0, 1.0), (3.0, 1.0)]

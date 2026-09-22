@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from .config import settings
 from . import db
 from .jobs import run_worker_loop
 
@@ -43,7 +44,6 @@ def main() -> int:
     worker_id = f"worker-{__import__('uuid').uuid4().hex[:12]}"
     logger.info("database ready — polling jobs id=%s", worker_id)
     try:
-        from .config import settings
         run_worker_loop(stop, worker_id, settings.worker_heartbeat_seconds,
                         settings.worker_lease_seconds)
     except Exception:

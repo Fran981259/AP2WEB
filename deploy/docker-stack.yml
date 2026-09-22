@@ -1,47 +1,93 @@
 services:
-  app:
-    image: ghcr.io/fran981259/ap2web:latest
+  proxy:
+    image: caddy:2.8-alpine
     environment:
-      AP2WEB_ENV: ${AP2WEB_ENV:-production}
-      AP2WEB_SECRET: ${AP2WEB_SECRET}
-      AP2WEB_BOOTSTRAP_ADMIN_USERNAME: ${AP2WEB_BOOTSTRAP_ADMIN_USERNAME:-}
-      AP2WEB_BOOTSTRAP_ADMIN_PASSWORD: ${AP2WEB_BOOTSTRAP_ADMIN_PASSWORD:-}
-      AP2WEB_ORIGINS: ${AP2WEB_ORIGINS}
+      AP2WEB_PUBLIC_DOMAIN: ${AP2WEB_PUBLIC_DOMAIN}
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - ap2web
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+  app:
+    image: ${AP2WEB_IMAGE}
+    environment:
+      AP2WEB_ENV: production
+      AP2WEB_SECRET_FILE: /run/secrets/ap2web_secret
+      AP2WEB_ORIGINS: https://${AP2WEB_PUBLIC_DOMAIN}
       AP2WEB_ENFORCE_ROLES: "true"
-      AP2WEB_COOKIE_SECURE: ${AP2WEB_COOKIE_SECURE:-true}
+      AP2WEB_COOKIE_SECURE: "true"
       AP2WEB_ENABLE_WORKER: "false"
       AP2WEB_REQUIRE_WORKER: "true"
       AP2WEB_RATE_LIMIT_STORAGE: redis
       AP2WEB_REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://ap2web:${POSTGRES_PASSWORD}@postgres:5432/ap2web
-    ports:
-      - target: 8000
-        published: 8000
-        protocol: tcp
-        mode: ingress
+      AP2WEB_TRUSTED_PROXY_CIDRS: 10.50.0.0/24
+      AP2WEB_DB_POOL_MIN_SIZE: "1"
+      AP2WEB_DB_POOL_MAX_SIZE: "3"
+      AP2WEB_RUNTIME_DATA_DIR: /data
+      DATABASE_URL_FILE: /run/secrets/ap2web_database_url
+    secrets:
+      - ap2web_secret
+      - ap2web_database_url
+    volumes:
+      - app_data:/data
     networks:
       - ap2web
     deploy:
-      replicas: 2
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 30s
+        order: stop-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
       restart_policy:
         condition: on-failure
-      update_config:
-        order: start-first
-        failure_action: rollback
+        delay: 10s
+        max_attempts: 0
 
   worker:
-    image: ghcr.io/fran981259/ap2web:latest
+    image: ${AP2WEB_IMAGE}
     command: ["python", "-m", "backend.app.worker"]
     environment:
-      AP2WEB_ENV: ${AP2WEB_ENV:-production}
-      AP2WEB_SECRET: ${AP2WEB_SECRET}
-      AP2WEB_ORIGINS: ${AP2WEB_ORIGINS}
+      AP2WEB_ENV: production
+      AP2WEB_SECRET_FILE: /run/secrets/ap2web_secret
       AP2WEB_ENFORCE_ROLES: "true"
-      AP2WEB_COOKIE_SECURE: ${AP2WEB_COOKIE_SECURE:-true}
+      AP2WEB_COOKIE_SECURE: "true"
       AP2WEB_REQUIRE_WORKER: "true"
       AP2WEB_RATE_LIMIT_STORAGE: redis
       AP2WEB_REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://ap2web:${POSTGRES_PASSWORD}@postgres:5432/ap2web
+      AP2WEB_DB_POOL_MIN_SIZE: "1"
+      AP2WEB_DB_POOL_MAX_SIZE: "3"
+      AP2WEB_RUNTIME_DATA_DIR: /data
+      DATABASE_URL_FILE: /run/secrets/ap2web_database_url
+    secrets:
+      - ap2web_secret
+      - ap2web_database_url
+    volumes:
+      - app_data:/data
     healthcheck:
       test:
         - CMD-SHELL
@@ -55,16 +101,25 @@ services:
     deploy:
       replicas: 1
       restart_policy:
-        condition: any
+        condition: on-failure
+        delay: 10s
+        max_attempts: 0
 
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: ap2web
       POSTGRES_USER: ap2web
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/ap2web_postgres_password
+    secrets:
+      - ap2web_postgres_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ap2web -d ap2web"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     networks:
       - ap2web
     deploy:
@@ -72,12 +127,19 @@ services:
       placement:
         constraints:
           - node.role == manager
+      restart_policy:
+        condition: on-failure
 
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     networks:
       - ap2web
     deploy:
@@ -85,11 +147,34 @@ services:
       placement:
         constraints:
           - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+configs:
+  caddyfile:
+    file: ./Caddyfile
+
+secrets:
+  ap2web_secret:
+    external: true
+    name: ${AP2WEB_SECRET_NAME}
+  ap2web_database_url:
+    external: true
+    name: ${AP2WEB_DATABASE_URL_SECRET_NAME}
+  ap2web_postgres_password:
+    external: true
+    name: ${AP2WEB_POSTGRES_PASSWORD_SECRET_NAME}
 
 volumes:
+  app_data:
+  caddy_data:
+  caddy_config:
   postgres_data:
   redis_data:
 
 networks:
   ap2web:
     driver: overlay
+    ipam:
+      config:
+        - subnet: 10.50.0.0/24

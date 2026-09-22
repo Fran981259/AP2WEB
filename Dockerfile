@@ -21,6 +21,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+RUN groupadd --system ap2web && useradd --system --gid ap2web --home /app ap2web
+
 COPY --from=backend /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=backend /usr/local/bin /usr/local/bin
 
@@ -28,12 +30,14 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist/
 
 COPY backend/ ./backend/
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chown -R ap2web:ap2web /app /data
 
 ENV AP2WEB_DB_PATH=/data/ap2web.db
 ENV AP2WEB_ORIGINS=https://app.theprostatereview.com
 
 EXPOSE 8000
+
+USER ap2web
 
 # Container liveness must not depend on another service. `/api/ready` remains
 # the strict dependency/readiness endpoint, but using it as the Docker check

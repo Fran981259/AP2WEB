@@ -121,8 +121,9 @@ def test_sync_job_renews_short_lease_during_league_work(monkeypatch):
         renewals.append((job_id, worker_id, lease_seconds))
         return original_renew(job_id, worker_id, lease_seconds)
 
-    monkeypatch.setattr("backend.app.sofascore_data.load_leagues", lambda: [{"name": "Test", "id": 1}])
-    monkeypatch.setattr(jobs, "renew_job_lease", renew)
+    monkeypatch.setattr("backend.app.sofascore.load_leagues", lambda: [{"name": "Test", "id": 1}])
+    monkeypatch.setattr(jobs.runner, "renew_job_lease", renew)
+    monkeypatch.setattr(jobs.registry, "renew_job_lease", renew)
 
     def sync(cfg, heartbeat=None):
         assert heartbeat is not None
@@ -130,7 +131,7 @@ def test_sync_job_renews_short_lease_during_league_work(monkeypatch):
         calls.append(cfg["id"])
         return {"ok": True}
 
-    monkeypatch.setattr("backend.app.sofascore_data.sync_league", sync)
+    monkeypatch.setattr("backend.app.sofascore.sync_league", sync)
     jobs._run_one(job, worker_id="short-lease-worker", lease_seconds=1)
 
     assert calls == [1]

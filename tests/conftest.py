@@ -58,8 +58,9 @@ def _db_ready():
     from backend.app import db
 
     db.init_db()
-    from backend.app import main, security
+    from backend.app import security
+    from backend.app.api import state
 
     security.prune_audit_log()
-    main._app_started_ok = True
+    state.started_ok = True
     yield
