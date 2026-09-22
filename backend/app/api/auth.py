@@ -98,10 +98,10 @@ def logout(request: Request, _: None = Depends(csrf_protect),
 
 
 @router.post("/api/auth/refresh", tags=["auth"])
-def auth_refresh(body: RefreshBody, request: Request,
+def auth_refresh(body: RefreshBody | None = None, request: Request = None,
                  _: None = Depends(csrf_protect),
                  __: None = Depends(rate_limit("refresh"))):
-    refresh_raw = body.refresh_token or request.cookies.get(REFRESH_COOKIE)
+    refresh_raw = (body.refresh_token if body else None) or request.cookies.get(REFRESH_COOKIE)
     if not refresh_raw:
         raise HTTPException(status_code=401, detail="Sessão inválida")
     data = refresh_session(refresh_raw, request)
