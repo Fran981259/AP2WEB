@@ -9,6 +9,7 @@ jobs:
       AP2WEB_DB_PATH: /tmp/ap2web-ci.db
       AP2WEB_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       AP2WEB_ENFORCE_ROLES: "true"
+      AP2WEB_COOKIE_SECURE: "false"
       AP2WEB_ENABLE_WORKER: "false"
     steps:
       - uses: actions/checkout@v4
