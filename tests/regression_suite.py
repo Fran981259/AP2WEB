@@ -43,6 +43,26 @@ def req(path, token=None, body=None, method=None):
     return urllib.request.urlopen(r, timeout=30)
 
 
+def login_bearer() -> str:
+    """Mobile login → access_token. Registers the test user on empty DBs."""
+    body = {"username": USER[0], "password": USER[1]}
+    try:
+        payload = json.load(req("/mobile/auth/login", body=body, method="POST"))
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        try:
+            json.load(req("/register", body=body, method="POST"))
+        except urllib.error.HTTPError as e2:
+            if e2.code not in (400, 409):
+                raise
+        payload = json.load(req("/mobile/auth/login", body=body, method="POST"))
+    token = payload.get("access_token")
+    if not token:
+        raise RuntimeError(f"login sem access_token: {payload!r}")
+    return token
+
+
 # ─────────────────────────── FASE A: API smoke ───────────────────────────
 
 def phase_api():
@@ -65,19 +85,19 @@ def phase_api():
 
     # auth: credenciais inválidas devem falhar
     try:
-        req("/login", body={"username": "tester", "password": "errada!"}, method="POST")
+        req("/login", body={"username": USER[0], "password": "errada!"}, method="POST")
         check("login inválido rejeitado", False, "aceitou senha errada")
     except urllib.error.HTTPError as e:
         check("login inválido rejeitado", e.code in (401, 400))
     except Exception as e:
         check("login inválido rejeitado", False, str(e))
 
-    # login válido
+    # login válido (contrato mobile: bearer no body; web login é cookie-only)
     try:
-        tok = json.load(req("/login", body={"username": USER[0], "password": USER[1]}, method="POST"))["token"]
-        check("login válido", True)
+        tok = login_bearer()
+        check("login válido (bearer)", True)
     except Exception as e:
-        check("login válido", False, str(e))
+        check("login válido (bearer)", False, str(e))
         return None
     H = {"Authorization": f"Bearer {tok}"}
 
@@ -93,44 +113,45 @@ def phase_api():
 
     with_data = [x for x in leagues if x["played"] > 50]
     if not with_data:
-        check("liga com dados p/ testar", False, "nenhuma liga >50 jogos")
-        return tok
-    lid = with_data[0]["id"]
+        print("  [SKIP] histórico: nenhuma liga >50 jogos (DB vazio) — checks de dados pulados")
+    else:
+        lid = with_data[0]["id"]
 
-    teams = get(f"/leagues/{lid}/teams")
-    check(f"/leagues/{lid}/teams", len(teams) > 0 and all("name" in t for t in teams))
+        teams = get(f"/leagues/{lid}/teams")
+        check(f"/leagues/{lid}/teams", len(teams) > 0 and all("name" in t for t in teams))
 
-    ms = get(f"/leagues/{lid}/matches")
-    check(f"/leagues/{lid}/matches", len(ms) > 0)
+        ms = get(f"/leagues/{lid}/matches")
+        check(f"/leagues/{lid}/matches", len(ms) > 0)
 
-    # previsão: partida jogada + validação probabilística
-    played = next((m for m in ms if m.get("status") == "played"), ms[0])
-    p1 = get(f"/matches/{played['id']}/prediction")
-    s = sum(p1["probs"]["1x2"].values())
-    check("previsão 1X2 soma≈1", abs(s - 1.0) < 0.02, f"soma={s:.4f}")
+        # previsão: partida jogada + validação probabilística
+        played = next((m for m in ms if m.get("status") == "played"), ms[0])
+        p1 = get(f"/matches/{played['id']}/prediction")
+        s = sum(p1["probs"]["1x2"].values())
+        check("previsão 1X2 soma≈1", abs(s - 1.0) < 0.02, f"soma={s:.4f}")
 
-    # as-of: deve responder e alterar features (filtro temporal ativo)
-    p2 = get(f"/matches/{played['id']}/prediction?as_of_timestamp=2026-01-01T00:00:00+00:00")
-    s2 = sum(p2["probs"]["1x2"].values())
-    check("previsão as-of responde + soma≈1", abs(s2 - 1.0) < 0.02)
-    check("as-of altera features", p2["data"]["home"]["count"] <= p1["data"]["home"]["count"])
+        # as-of: deve responder e alterar features (filtro temporal ativo)
+        # %2B: '+' em query string decodifica como espaço e quebra fromisoformat
+        p2 = get(f"/matches/{played['id']}/prediction?as_of_timestamp=2026-01-01T00:00:00%2B00:00")
+        s2 = sum(p2["probs"]["1x2"].values())
+        check("previsão as-of responde + soma≈1", abs(s2 - 1.0) < 0.02)
+        check("as-of altera features", p2["data"]["home"]["count"] <= p1["data"]["home"]["count"])
 
-    # fixture
-    fx = get(f"/leagues/{lid}/teams")  # times válidos
-    body = {"league_id": lid, "home_team_id": fx[0]["id"], "away_team_id": fx[1]["id"]}
-    fix = json.load(urllib.request.urlopen(urllib.request.Request(
-        BASE + "/predict/fixture", data=json.dumps(body).encode(),
-        headers={**H, "Content-Type": "application/json"}), timeout=60))
-    sf = sum(fix["probs"]["1x2"].values())
-    check("predict/fixture soma≈1", abs(sf - 1.0) < 0.02)
+        # fixture (Bearer isença CSRF)
+        fx = get(f"/leagues/{lid}/teams")  # times válidos
+        body = {"league_id": lid, "home_team_id": fx[0]["id"], "away_team_id": fx[1]["id"]}
+        fix = json.load(urllib.request.urlopen(urllib.request.Request(
+            BASE + "/predict/fixture", data=json.dumps(body).encode(),
+            headers={**H, "Content-Type": "application/json"}), timeout=60))
+        sf = sum(fix["probs"]["1x2"].values())
+        check("predict/fixture soma≈1", abs(sf - 1.0) < 0.02)
 
-    # learning
+        # backtest precisa de histórico
+        bt = get(f"/learning/backtest/{lid}")
+        check("/learning/backtest", "accuracy" in bt and "brier" in bt)
+
+    # learning + histórico (funcionam em DB vazio)
     st = get("/learning/status")
     check("/learning/status", "calibrated" in st)
-    bt = get(f"/learning/backtest/{lid}")
-    check("/learning/backtest", "accuracy" in bt and "brier" in bt)
-
-    # histórico
     pr = get("/predictions")
     check("/predictions", "stats" in pr and "items" in pr)
 

@@ -14,6 +14,20 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 REPO_ROOT="$( cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd )"
 cd "${REPO_ROOT}"
 
+# ── Optional .env (gitignored; fills only vars not already exported) ─────────
+# Priority: shell exports > .env > defaults abaixo.
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    val="${val%\"}"
+    val="${val#\"}"
+    [[ -v "${key}" ]] || export "${key}=${val}"
+  done < "${REPO_ROOT}/.env"
+  echo "[dev.sh] .env carregado: ${REPO_ROOT}/.env"
+fi
+
 # ── Local-development defaults (do not overwrite if user already set them) ────
 : "${AP2WEB_ENV:=development}"
 : "${AP2WEB_SECRET:=dev-secret-change-me-please-use-env-var-0123456789abcdef}"
