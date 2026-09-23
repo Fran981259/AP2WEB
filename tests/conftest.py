@@ -47,6 +47,22 @@ os.environ.setdefault("AP2WEB_RATE_LIMIT_ENABLED", "true")
 os.environ.setdefault("AP2WEB_RATE_LIMIT_STORAGE", "memory")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_rate_limit():
+    """Reset shared in-memory rate-limit counters around every test.
+
+    Login/register tests in different modules share one limiter for the
+    session; without isolation a late test sees a 429 and its cookies never
+    get set. Per-test reset keeps limit semantics testable (each test can
+    still exhaust its own quota) while preventing cross-test leakage.
+    """
+    from backend.app.ratelimit import rate_limiter
+
+    rate_limiter.reset()
+    yield
+    rate_limiter.reset()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _db_ready():
     """Initialize the isolated schema before any test accesses the database.
