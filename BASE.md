@@ -24,7 +24,8 @@ API requests -> persistent jobs table -> separate worker -> sync/calibration/bac
   `DATABASE_URL` for deployed environments.
 - Worker: `python -m backend.app.worker`; it must be a separate process outside
   local development.
-- Frontend: React/Vite in `frontend/`.
+- Frontend: React/Vite in `frontend/` (entry `frontend/src/App.jsx`).
+- Feature aggregation: `backend/app/feature_engine.py` (team perspective).
 
 ## Scientific Contract
 

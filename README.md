@@ -44,9 +44,16 @@ npm run test
   heartbeat when a worker is required.
 - `GET /api/health/dependencies`: safe dependency status.
 
+## Architecture
+
+See `PROJECT_MAP.md` for module ownership and `BASE.md` for scientific
+contract. Production Swarm stack lives in `deploy/` (`deploy/README.md`).
+
 ## Deployment
 
-Railway is the production target. API, standalone worker, PostgreSQL, Redis,
-and UptimeRobot readiness/liveness monitors were validated on 2026-09-13.
+Primary target: Docker Swarm on a single VPS (see `deploy/README.md`
+rollout checklist: secrets → DNS/firewall → render → deploy → verify).
+Railway remains a legacy reference (`RAILWAY.md`); historical validation of
+API/worker/PostgreSQL/Redis and UptimeRobot monitors: 2026-09-13.
 Scientific features and market/risk signals remain experimental. See
-`RAILWAY.md`, `MIGRATION.md`, and `PROTOCOLO-AVALIACAO-CIENTIFICA.md`.
+`MIGRATION.md` and `PROTOCOLO-AVALIACAO-CIENTIFICA.md`.

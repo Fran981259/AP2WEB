@@ -7,7 +7,7 @@
 | Local and test | SQLite via `AP2WEB_DB_PATH` |
 | Deployment | PostgreSQL via `DATABASE_URL` |
 
-`db.py` supports both modes. Test PostgreSQL separately before cutover; SQLite
+`backend/app/db.py` supports both modes. Test PostgreSQL separately before cutover; SQLite
 success is not PostgreSQL validation.
 
 ## SQLite To PostgreSQL Cutover
