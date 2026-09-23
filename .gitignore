@@ -17,6 +17,9 @@ artifacts/*.dump
 node_modules/
 frontend/dist/
 
+# Expo (mobile app)
+.expo/
+
 # Ambiente
 .env
 

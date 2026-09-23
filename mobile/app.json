@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "AP2WEB",
+    "slug": "ap2web-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "ap2web",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.ap2web.mobile"
+    },
+    "plugins": ["expo-secure-store"]
+  }
+}
