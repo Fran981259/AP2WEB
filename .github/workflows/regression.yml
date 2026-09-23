@@ -67,21 +67,42 @@ jobs:
           echo "Secret scan OK"
 
       - name: Runtime smoke (backend boot + /api/ready + smoke script)
+        shell: bash
         run: |
+          set -euo pipefail
+          echo "::group::start uvicorn"
           backend/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 > backend.log 2>&1 &
           BPID=$!
           trap 'kill $BPID 2>/dev/null || true' EXIT
           ready=false
           for i in $(seq 1 40); do
             if curl -sSf http://127.0.0.1:8000/api/ready >/dev/null 2>&1; then ready=true; break; fi
+            if ! kill -0 "$BPID" 2>/dev/null; then
+              echo "uvicorn exited early"; cat backend.log; exit 1
+            fi
             sleep 1
           done
+          echo "::endgroup::"
           if [ "$ready" != "true" ]; then echo "Backend não ficou pronto. Logs:"; cat backend.log; exit 1; fi
+          echo "::group::health"
           curl -sSf http://127.0.0.1:8000/api/health >/dev/null
           curl -sSf http://127.0.0.1:8000/api/health/dependencies >/dev/null
+          echo "::endgroup::"
+          echo "::group::regression phase A"
           backend/.venv/bin/python tests/regression_suite.py --phase A
+          echo "::endgroup::"
+          echo "::group::smoke local"
           FRONTEND_URL=skip backend/.venv/bin/python tests/test_smoke_local.py \
             && echo "smoke backend-only OK (frontend sobe em CI separada)"
+          echo "::endgroup::"
+
+      - name: Upload backend.log on smoke failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-smoke-backend-log
+          path: backend.log
+          if-no-files-found: ignore
 
   docker-build:
     runs-on: ubuntu-latest

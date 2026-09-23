@@ -17,8 +17,8 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = "http://localhost:8000/api"
-FRONT = "http://localhost:5173"
+BASE = "http://127.0.0.1:8000/api"
+FRONT = "http://127.0.0.1:5173"
 import os as _os  # noqa: E402
 USER = (_os.environ.get("AP2WEB_TEST_USER", "tester"), _os.environ.get("AP2WEB_TEST_PASS", "rlcupicKR3&tLBnGUKly"))
 
